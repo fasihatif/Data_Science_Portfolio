@@ -1,0 +1,918 @@
+---
+title: "Assignment 2"
+author: "Fasih Atif/Abduvosid Malik"
+date: "2/8/2021"
+output: 
+  html_document:
+    rmdformats::robobook
+  
+---
+```{r libraries, include = FALSE, message=FALSE, warning=FALSE}
+# Import libraries
+library(rmdformats)
+library(stringr)  
+library(fastDummies)
+library(ggpubr)
+library(cowplot)
+library(rstatix)
+library(scales)
+library(Metrics)
+library(caret)
+library(stargazer)
+library(pROC)
+library(ranger)
+library(viridis)
+library(rpart)
+library(partykit)
+library(rpart.plot)
+library(kableExtra)
+library(tidyverse)
+library(dplyr)
+
+```
+
+
+```{r import data, include = FALSE, message=FALSE, warning=FALSE}
+data <- read.csv('https://raw.githubusercontent.com/fasihatif/Data-Analysis-1-2-3/master/Data_Analysis_3/Assignment_2_DA3/data/cs_bisnode_panel_11-15.csv')
+
+backup1 <- data
+```
+
+```{r backup 1, include = FALSE, message=FALSE, warning=FALSE}
+data <- backup1
+```
+
+```{r}
+source('C:/Users/abc/OneDrive/Business_Analytics/Data-Analysis-1-2-3/Data_Analysis_3/Assignment_2_DA3/code/helper/helper_functions.r')
+
+source('C:/Users/abc/OneDrive/Business_Analytics/Data-Analysis-1-2-3/Data_Analysis_3/Assignment_2_DA3/code/helper/theme_bg.r')
+```
+
+
+```{r data cleaning, include = FALSE, message=FALSE, warning=FALSE}
+
+#0.2 | Filter balance sheet length and years
+#-----------------------------------------------------
+data <- data %>% filter(balsheet_length > 360) #assuming it as a complete year
+data <- data %>% filter(year == 2013 | year == 2014)
+
+
+#0.3 | Create status_alive variable to check if company existed or not
+#---------------------------------------------------------------------
+data  <- data %>%
+  mutate(status_alive = sales > 0 & !is.na(sales) %>%
+           as.numeric(.))
+
+
+#0.4 | Take log of sales and sales_mil
+#---------------------------------------
+data <- data %>%
+  mutate(sales = ifelse(sales < 0, 1, sales),
+         ln_sales = ifelse(sales > 0, log(sales), 0),
+         sales_mil=sales/1000000,
+         sales_mil_log = ifelse(sales > 0, log(sales_mil), 0))
+
+data <- data %>%
+  group_by(comp_id) %>%
+  mutate(d1_sales_mil_log = sales_mil_log - lag(sales_mil_log, 1) ) %>%
+  ungroup()
+
+
+# 0.5 | Replace w 0 for new firms + add dummy to capture it
+#------------------------------------------------------------
+data <- data %>%
+  mutate(age = (year - founded_year) %>%
+           ifelse(. < 0, 0, .),
+         new = as.numeric(age <= 1) %>% #  (age could be 0,1 )
+           ifelse(balsheet_notfullyear == 1, 1, .),
+         d1_sales_mil_log = ifelse(new == 1, 0, d1_sales_mil_log),
+         new = ifelse(is.na(d1_sales_mil_log), 1, new),
+         d1_sales_mil_log = ifelse(is.na(d1_sales_mil_log), 0, d1_sales_mil_log))
+
+
+#0.5 | Filter for status = alive and sales mil > 10 & < 0.001
+#--------------------------------------------------------------
+data <- data %>%
+  filter(status_alive == 1) %>%
+  filter(!(sales_mil > 10)) %>%
+  filter(!(sales_mil < 0.001))
+
+
+#0.6 | Filter company ids with only 2 rows
+#------------------------------------------
+data <- data %>% group_by(comp_id) %>% filter(n() == 2)
+
+
+#0.7 | Calculate percentage change of sales_mil
+#-----------------------------------------------
+data <- data %>% group_by(comp_id)
+# data <- data %>% mutate(pct_change = (sales_mil_log-lag(sales_mil_log))/lag(sales_mil_log))
+data <- data %>% mutate(pct_change = (ln_sales - lag(ln_sales))/lag(ln_sales))
+
+
+#0.8 | Filter for year 2014
+#---------------------------
+data <- data %>%
+  filter(year == 2014)
+
+
+#0.9 | Drop unnecessary columns
+#-------------------------------
+data$COGS <- NULL
+data$finished_prod <- NULL
+data$net_dom_sales <- NULL
+data$net_exp_sales <- NULL
+data$wages <- NULL
+data$status_alive <- NULL
+data$exit_year <- NULL
+data$exit_date <- NULL
+data$D <- NULL
+data$balsheet_flag <- NULL
+data$balsheet_length <- NULL
+data$balsheet_notfullyear <- NULL
+
+#0.10 | create age variable
+#---------------------------
+data <- data %>%
+  mutate(age = (year - founded_year))
+
+
+#0.11 | Create the Y variable
+#-----------------------------
+data <- data %>% mutate(comp_growth = ifelse(pct_change > 0.15,1,0))
+
+#summary(data$pct_change)
+#table(data$comp_growth) 
+
+
+# 1.0                            FEATURE ENGINEERING
+#------------------------------------------------------------------------------#
+
+#1.1 |  Change industry codes
+#--------------------------
+data <- data %>%
+  mutate(ind2_cat = ind2 %>%
+           ifelse(. > 56, 60, .)  %>%
+           ifelse(. < 26, 20, .) %>%
+           ifelse(. < 55 & . > 35, 40, .) %>%
+           ifelse(. == 31, 30, .) %>%
+           ifelse(is.na(.), 99, .)
+  )
+
+
+#1.2 | Firm characteristics
+#--------------------------
+data <- data %>%
+  mutate(age2 = age^2,
+         foreign_management = as.numeric(foreign >= 0.5),
+         gender_m = factor(gender, levels = c("female", "male", "mix")),
+         m_region_loc = factor(region_m, levels = c("Central", "East", "West")))
+
+
+#1.3 |  Assets can't be negative. Change them to 0 and add a flag
+#------------------------------------------------------------------
+data <-data  %>%
+  mutate(flag_asset_problem=ifelse(intang_assets<0 | curr_assets<0 | fixed_assets<0,1,0  ))
+table(data$flag_asset_problem)
+
+data <- data %>%
+  mutate(intang_assets = ifelse(intang_assets < 0, 0, intang_assets),
+         curr_assets = ifelse(curr_assets < 0, 0, curr_assets),
+         fixed_assets = ifelse(fixed_assets < 0, 0, fixed_assets))
+
+
+#1.4 | Generate total assets
+#-----------------------------
+data <- data %>%
+  mutate(total_assets_bs = intang_assets + curr_assets + fixed_assets)
+summary(data$total_assets_bs)
+
+
+#1.4 | Create ratios
+#---------------------
+pl_names <- c("extra_exp","extra_inc",  "extra_profit_loss", "inc_bef_tax" ,"inventories",
+              "material_exp", "profit_loss_year", "personnel_exp")
+bs_names <- c("intang_assets", "curr_liab", "fixed_assets", "liq_assets", "curr_assets",
+              "share_eq", "subscribed_cap", "tang_assets")
+
+# divide all pl_names elements by sales and create new column for it
+data <- data %>%
+  mutate_at(vars(pl_names), funs("pl"=./sales))
+
+# divide all bs_names elements by total_assets_bs and create new column for it
+data <- data %>%
+  mutate_at(vars(bs_names), funs("bs"=ifelse(total_assets_bs == 0, 0, ./total_assets_bs)))
+
+
+#1.5 | Creating flags, and winsorizing tails
+#---------------------------------------------
+# Variables that represent accounting items that cannot be negative (e.g. materials)
+zero <-  c("extra_exp_pl", "extra_inc_pl", "inventories_pl", "material_exp_pl", "personnel_exp_pl",
+           "curr_liab_bs", "fixed_assets_bs", "liq_assets_bs", "curr_assets_bs", "subscribed_cap_bs",
+           "intang_assets_bs")
+
+data <- data %>%
+  mutate_at(vars(zero), funs("flag_high"= as.numeric(.> 1))) %>%
+  mutate_at(vars(zero), funs(ifelse(.> 1, 1, .))) %>%
+  mutate_at(vars(zero), funs("flag_error"= as.numeric(.< 0))) %>%
+  mutate_at(vars(zero), funs(ifelse(.< 0, 0, .)))
+
+
+# for vars that could be any, but are mostly between -1 and 1
+any <-  c("extra_profit_loss_pl", "inc_bef_tax_pl", "profit_loss_year_pl", "share_eq_bs")
+
+data <- data %>%
+  mutate_at(vars(any), funs("flag_low"= as.numeric(.< -1))) %>%
+  mutate_at(vars(any), funs(ifelse(.< -1, -1, .))) %>%
+  mutate_at(vars(any), funs("flag_high"= as.numeric(.> 1))) %>%
+  mutate_at(vars(any), funs(ifelse(.> 1, 1, .))) %>%
+  mutate_at(vars(any), funs("flag_zero"= as.numeric(.== 0))) %>%
+  mutate_at(vars(any), funs("quad"= .^2))
+
+
+# dropping flags with no variation
+variances<- data %>%
+  select(contains("flag")) %>%
+  apply(2, var, na.rm = TRUE) == 0
+
+data <- data %>%
+  select(-one_of(names(variances)[variances]))
+
+
+#1.6 | Imputation of some columns
+#----------------------------------
+# CEO age
+data <- data %>%
+  mutate(ceo_age = year-birth_year,
+         flag_low_ceo_age = as.numeric(ceo_age < 25 & !is.na(ceo_age)),
+         flag_high_ceo_age = as.numeric(ceo_age > 75 & !is.na(ceo_age)),
+         flag_miss_ceo_age = as.numeric(is.na(ceo_age)))
+
+data <- data %>%
+  mutate(ceo_age = ifelse(ceo_age < 25, 25, ceo_age) %>%
+           ifelse(. > 75, 75, .) %>%
+           ifelse(is.na(.), mean(., na.rm = TRUE), .),
+         ceo_young = as.numeric(ceo_age < 40))
+
+# number emp, very noisy measure
+data <- data %>%
+  dplyr::mutate(labor_avg_mod = ifelse(is.na(labor_avg), mean(labor_avg, na.rm = TRUE), as.numeric(labor_avg)),
+                flag_miss_labor_avg = as.numeric(is.na(labor_avg)))
+
+data$labor_avg_mod[is.na(data$labor_avg_mod)]<-mean(data$labor_avg_mod,na.rm=TRUE)
+
+
+data <- data %>%
+  select(-labor_avg)
+
+# create factors
+data <- data %>%
+  mutate(urban_m = factor(urban_m, levels = c(1,2,3)),
+         ind2_cat = factor(ind2_cat, levels = sort(unique(data$ind2_cat))))
+
+data <- data %>%
+  mutate(comp_growth_f = factor(comp_growth, levels = c(0,1)) %>%
+           recode(., `0` = 'slow', `1` = "fast"))
+
+data <- data %>%
+  mutate(sales_mil_log_sq=sales_mil_log^2)
+
+# generate variables
+
+data <- data %>%
+  mutate(flag_low_d1_sales_mil_log = ifelse(d1_sales_mil_log < -1.5, 1, 0),
+         flag_high_d1_sales_mil_log = ifelse(d1_sales_mil_log > 1.5, 1, 0),
+         d1_sales_mil_log_mod = ifelse(d1_sales_mil_log < -1.5, -1.5,
+                                       ifelse(d1_sales_mil_log > 1.5, 1.5, d1_sales_mil_log)),
+         d1_sales_mil_log_mod_sq = d1_sales_mil_log_mod^2
+  )
+
+
+
+#1.6 | Sales Change
+#-------------------
+
+# no more imputation, drop obs if key vars missing
+data <- data %>%
+  filter(!is.na(liq_assets_bs),!is.na(foreign), !is.na(ind))
+
+# drop missing
+data <- data %>%
+  filter(!is.na(age),!is.na(foreign), !is.na(material_exp_pl), !is.na(m_region_loc))
+Hmisc::describe(data$age)
+
+# drop unused factor levels
+data <- data %>%
+  mutate_at(vars(colnames(data)[sapply(data, is.factor)]), funs(fct_drop))
+```
+
+## Introduction
+
+
+
+## Logit Regression
+
+```{r dataset split, include = FALSE, warning = FALSE, message = FALSE}
+set.seed(13505)
+
+train_indices <- as.integer(createDataPartition(data$comp_growth, p = 0.8, list = FALSE))
+data_train <- data[train_indices, ]
+data_holdout <- data[-train_indices, ]
+```
+
+
+```{r, logit model equations}
+# Define variable sets ----------------------------------------------
+# (making sure we use ind2_cat, which is a factor)
+
+rawvars <-  c("curr_assets", "curr_liab", "extra_exp", "extra_inc", "extra_profit_loss", "fixed_assets",
+              "inc_bef_tax", "intang_assets", "inventories", "liq_assets", "material_exp", "personnel_exp",
+              "profit_loss_year", "sales", "share_eq", "subscribed_cap")
+
+engvar <- c("total_assets_bs", "fixed_assets_bs", "liq_assets_bs", "curr_assets_bs",
+            "share_eq_bs", "subscribed_cap_bs", "intang_assets_bs", "extra_exp_pl",
+            "extra_inc_pl", "extra_profit_loss_pl", "inc_bef_tax_pl", "inventories_pl",
+            "material_exp_pl", "profit_loss_year_pl", "personnel_exp_pl")
+engvar2 <- c("extra_profit_loss_pl_quad", "inc_bef_tax_pl_quad",
+             "profit_loss_year_pl_quad", "share_eq_bs_quad")
+engvar3 <- c(grep("*flag_low$", names(data), value = TRUE),
+             grep("*flag_high$", names(data), value = TRUE),
+             grep("*flag_error$", names(data), value = TRUE),
+             grep("*flag_zero$", names(data), value = TRUE))
+d1 <-  c("d1_sales_mil_log_mod", "d1_sales_mil_log_mod_sq",
+         "flag_low_d1_sales_mil_log", "flag_high_d1_sales_mil_log")
+hr <- c("female", "ceo_age", "flag_high_ceo_age", "flag_low_ceo_age",
+        "flag_miss_ceo_age", "ceo_count", "labor_avg_mod",
+        "flag_miss_labor_avg", "foreign_management")
+firm <- c("age", "age2", "new", "ind2_cat", "m_region_loc", "urban_m")
+
+# interactions for logit, LASSO
+interactions1 <- c("ind2_cat*age", "ind2_cat*age2",
+                   "ind2_cat*d1_sales_mil_log_mod", "ind2_cat*sales_mil_log",
+                   "ind2_cat*ceo_age", "ind2_cat*foreign_management",
+                   "ind2_cat*female",   "ind2_cat*urban_m", "ind2_cat*labor_avg_mod")
+interactions2 <- c("sales_mil_log*age", "sales_mil_log*female",
+                   "sales_mil_log*profit_loss_year_pl", "sales_mil_log*foreign_management")
+
+
+X1 <- c("sales_mil_log", "sales_mil_log_sq", "d1_sales_mil_log_mod", "profit_loss_year_pl", "ind2_cat")
+X2 <- c("sales_mil_log", "sales_mil_log_sq", "d1_sales_mil_log_mod", "profit_loss_year_pl", "fixed_assets_bs","share_eq_bs","curr_liab_bs ",   "curr_liab_bs_flag_high ", "curr_liab_bs_flag_error",  "age","foreign_management" , "ind2_cat")
+X3 <- c("sales_mil_log", "sales_mil_log_sq", firm, engvar,                   d1)
+X4 <- c("sales_mil_log", "sales_mil_log_sq", firm, engvar, engvar2, engvar3, d1, hr)
+X5 <- c("sales_mil_log", "sales_mil_log_sq", firm, engvar, engvar2, engvar3, d1, hr, interactions1, interactions2)
+
+# for LASSO
+logitvars <- c("sales_mil_log", "sales_mil_log_sq", engvar, engvar2, engvar3, d1, hr, firm, interactions1, interactions2)
+
+# for RF (no interactions, no modified features)
+rfvars  <-  c("sales_mil", "d1_sales_mil_log", rawvars, hr, firm)
+
+```
+
+
+We will build a predictive model of the probability of firm achieving fast growth for which we considered 5 logit models. From Model 1 to Model 5, they increase in complexity as we add in more variables, functional forms, and interactions.
+
+The models 1-5 are shown below:
+
+```{r twoClassSummaryExtended function, include = FALSE, warning = FALSE, message = FALSE}
+twoClassSummaryExtended <- function (data, lev = NULL, model = NULL)
+{
+  lvls <- levels(data$obs)
+  rmse <- sqrt(mean((data[, lvls[1]] - ifelse(data$obs == lev[2], 0, 1))^2))
+  c(defaultSummary(data, lev, model), "RMSE" = rmse)
+}
+```
+
+```{r logit regression, include = FALSE, warning = FALSE, message = FALSE}
+
+# 5 fold cross-validation
+train_control <- trainControl(
+  method = "cv",
+  number = 5,
+  classProbs = TRUE,
+  summaryFunction = twoClassSummaryExtended,
+  savePredictions = TRUE
+)
+
+
+# Train Logit Models ----------------------------------------------
+
+logit_model_vars <- list("Model 1" = X1, "Model 2" = X2, "Model 3" = X3, "Model 4" = X4, "Model 5" = X5)
+
+CV_RMSE_folds <- list()
+logit_models <- list()
+
+for (model_name in names(logit_model_vars)) {
+
+  features <- logit_model_vars[[model_name]]
+
+  set.seed(13505)
+  glm_model <- train(
+    formula(paste0("comp_growth_f ~", paste0(features, collapse = " + "))),
+    method = "glm",
+    data = data_train,
+    family = binomial,
+    trControl = train_control,
+    na.action=na.exclude
+  )
+
+  logit_models[[model_name]] <- glm_model
+  # Calculate RMSE on test for each fold
+  CV_RMSE_folds[[model_name]] <- glm_model$resample[,c("Resample", "RMSE")]
+  
+}
+```
+
+## Logit Lasso
+
+```{r logit lasso, include = FALSE, warning = FALSE, message = FALSE}
+
+lambda <- 10^seq(-1, -4, length = 10)
+grid <- expand.grid("alpha" = 1, lambda = lambda)
+
+set.seed(13505)
+system.time({
+  logit_lasso_model <- train(
+    formula(paste0("comp_growth_f ~", paste0(logitvars, collapse = " + "))),
+    data = data_train,
+    method = "glmnet",
+    preProcess = c("center", "scale"),
+    family = "binomial",
+    trControl = train_control,
+    tuneGrid = grid,
+    na.action=na.exclude
+  )
+})
+
+tuned_logit_lasso_model <- logit_lasso_model$finalModel
+best_lambda <- logit_lasso_model$bestTune$lambda
+logit_models[["LASSO"]] <- logit_lasso_model
+lasso_coeffs <- as.matrix(coef(tuned_logit_lasso_model, best_lambda))
+
+CV_RMSE_folds[["LASSO"]] <- logit_lasso_model$resample[,c("Resample", "RMSE")]
+```
+
+```{r model results for logit, include = FALSE, warning = FALSE, message = FALSE}
+
+# Draw ROC Curve and calculate AUC for each folds --------------------------------
+CV_AUC_folds <- list()
+
+for (model_name in names(logit_models)) {
+
+  auc <- list()
+  model <- logit_models[[model_name]]
+  for (fold in c("Fold1", "Fold2", "Fold3", "Fold4", "Fold5")) {
+    cv_fold <-
+      model$pred %>%
+      filter(Resample == fold)
+
+    roc_obj <- roc(cv_fold$obs, cv_fold$fast)
+    auc[[fold]] <- as.numeric(roc_obj$auc)
+  }
+
+  CV_AUC_folds[[model_name]] <- data.frame("Resample" = names(auc),
+                                              "AUC" = unlist(auc))
+}
+
+# For each model: average RMSE and average AUC for models ----------------------------------
+
+CV_RMSE <- list()
+CV_AUC <- list()
+
+for (model_name in names(logit_models)) {
+  CV_RMSE[[model_name]] <- mean(CV_RMSE_folds[[model_name]]$RMSE)
+  CV_AUC[[model_name]] <- mean(CV_AUC_folds[[model_name]]$AUC)
+}
+
+# We have 6 models, (5 logit and the logit lasso). For each we have a 5-CV RMSE and AUC.
+# We pick our preferred model based on that. -----------------------------------------------
+
+nvars <- lapply(logit_models, FUN = function(x) length(x$coefnames))
+nvars[["LASSO"]] <- sum(lasso_coeffs != 0)
+
+logit_summary1 <- data.frame("Number of predictors" = unlist(nvars),
+                             "CV RMSE" = unlist(CV_RMSE),
+                             "CV AUC" = unlist(CV_AUC))
+
+names(logit_summary1) <- c("Number of Predictors", "CV RMSE", "CV AUC")
+```
+
+```{r logit summary model, echo = FALSE, warning = FALSE, message = FALSE}
+logit_summary1 %>% kbl(caption = "<center><strong> Average RMSE and average AUC for 6 Models</strong></center>", escape = FALSE) %>%
+  kable_classic(full_width = F, html_font = "Cambria") %>%
+  kable_styling( position = "center")
+```
+
+```{r holdout/roc, echo = FALSE, warning = FALSE, message = FALSE}
+best_logit_no_loss <- logit_models[["Model 1"]]
+
+logit_predicted_probabilities_holdout <- predict(best_logit_no_loss, newdata = data_holdout, type = "prob")
+data_holdout[,"best_logit_no_loss_pred"] <- logit_predicted_probabilities_holdout[,"fast"]
+RMSE(data_holdout[, "best_logit_no_loss_pred", drop=TRUE], data_holdout$fast)
+
+# discrete ROC (with thresholds in steps) on holdout -------------------------------------------------
+thresholds <- seq(0.05, 1, by = 0.01)
+
+cm <- list()
+true_positive_rates <- c()
+false_positive_rates <- c()
+for (thr in thresholds) {
+  holdout_prediction <- ifelse(data_holdout[,"best_logit_no_loss_pred"] < thr, "slow", "fast") %>%
+    factor(levels = c("slow", "fast"))
+  cm_thr <- confusionMatrix(holdout_prediction,data_holdout$comp_growth_f)$table
+  cm[[as.character(thr)]] <- cm_thr
+  true_positive_rates <- c(true_positive_rates, cm_thr["fast", "fast"] /
+                             (cm_thr["fast", "fast"] + cm_thr["slow", "fast"]))
+  false_positive_rates <- c(false_positive_rates, cm_thr["fast", "slow"] /
+                              (cm_thr["fast", "slow"] + cm_thr["slow", "fast"]))
+}
+
+tpr_fpr_for_thresholds <- tibble(
+  "threshold" = thresholds,
+  "true_positive_rate" = true_positive_rates,
+  "false_positive_rate" = false_positive_rates
+)
+
+discrete_roc_plot <- ggplot(
+  data = tpr_fpr_for_thresholds,
+  aes(x = false_positive_rate, y = true_positive_rate, color = threshold)) +
+  labs(x = "False positive rate (1 - Specificity)", y = "True positive rate (Sensitivity)") +
+  geom_point(size=2, alpha=0.8) +
+  scale_color_viridis(option = "D", direction = -1) +
+  scale_x_continuous(expand = c(0.01,0.01), limit=c(0,1), breaks = seq(0,1,0.1)) +
+  scale_y_continuous(expand = c(0.01,0.01), limit=c(0,1), breaks = seq(0,1,0.1)) +
+  theme_bw() +
+  theme(legend.position ="right") +
+  theme(legend.title = element_text(size = 4), 
+        legend.text = element_text(size = 4),
+        legend.key.size = unit(.4, "cm")) 
+discrete_roc_plot
+```
+```{r continuous ROC, echo = FALSE}
+
+# createRocPlot <- function(r, file_name,  mywidth_large=12, myheight_large = 9) {
+createRocPlot <- function(r, file_name,  myheight_small = 5.625, mywidth_small = 7.5) {
+  all_coords <- coords(r, x="all", ret="all", transpose = FALSE)
+
+  roc_plot <- ggplot(data = all_coords, aes(x = fpr, y = tpr)) +
+    geom_line(color= "red", size = 0.7) +
+    geom_area(aes(fill = "white",alpha=0.4), alpha = 0.3, position = 'identity', color = "red") +
+    scale_fill_viridis(discrete = TRUE, begin=0.6, alpha=0.5, guide = FALSE) +
+    xlab("False Positive Rate (1-Specifity)") +
+    ylab("True Positive Rate (Sensitivity)") +
+    geom_abline(intercept = 0, slope = 1,  linetype = "dotted", col = "black") +
+    scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, .1), expand = c(0, 0.01)) +
+    scale_x_continuous(limits = c(0, 1), breaks = seq(0, 1, .1), expand = c(0.01, 0)) +
+    theme_bw()
+  #+    theme(axis.text.x = element_text(size=13), axis.text.y = element_text(size=13),
+  #        axis.title.x = element_text(size=13), axis.title.y = element_text(size=13))
+
+  #ggsave(plot = roc_plot, paste0(file_name, ".png"),      width=mywidth_small, height=myheight_small, dpi=1200)
+  #cairo_ps(filename = paste0(file_name, ".eps"),    #        width = mywidth_small, height = myheight_small, pointsize = 12,    #       fallback_resolution = 1200)
+  #print(roc_plot)
+  #dev.off()
+
+  roc_plot
+}
+
+
+roc_obj_holdout <- roc(data_holdout$comp_growth, data_holdout$best_logit_no_loss_pred)
+
+createRocPlot(roc_obj_holdout, "best_logit_no_loss_roc_plot_holdout")
+```
+```{r cm, echo = FALSE, warning = FALSE, message = FALSE}
+# default: the threshold 0.5 is used to convert probabilities to binary classes
+logit_class_prediction <- predict(best_logit_no_loss, newdata = data_holdout)
+summary(logit_class_prediction)
+
+# confusion matrix: summarize different type of errors and successfully predicted cases
+# positive = "yes": explicitly specify the positive case
+cm_object1 <- confusionMatrix(logit_class_prediction, data_holdout$comp_growth_f, positive = "fast")
+cm1 <- cm_object1$table
+cm1
+
+# we can apply different thresholds
+
+# 0.5 same as before
+holdout_prediction <-
+  ifelse(data_holdout$best_logit_no_loss_pred < 0.5, "slow", "fast") %>%
+  factor(levels = c("slow", "fast"))
+cm_object1b <- confusionMatrix(holdout_prediction,data_holdout$comp_growth_f)
+cm1b <- cm_object1b$table
+cm1b
+
+# a sensible choice: mean of predicted probabilities
+mean_predicted_default_prob <- mean(data_holdout$best_logit_no_loss_pred)
+mean_predicted_default_prob
+holdout_prediction <-
+  ifelse(data_holdout$best_logit_no_loss_pred < mean_predicted_default_prob, "slow", "fast") %>%
+  factor(levels = c("slow", "fast"))
+cm_object2 <- confusionMatrix(holdout_prediction,data_holdout$comp_growth_f)
+cm2 <- cm_object2$table
+cm2
+
+```
+
+```{r , echo = FALSE, warning = FALSE, message = FALSE}
+# Calibration curve -----------------------------------------------------------
+# how well do estimated vs actual event probabilities relate to each other?
+create_calibration_plot <- function(data, file_name, prob_var, actual_var, y_lab = "Actual event probability" , n_bins = 10, breaks = NULL) {
+  
+  if (is.null(breaks)) {
+    breaks <- seq(0,1,length.out = n_bins + 1)
+  }
+
+  binned_data <- data %>%
+    mutate(
+      prob_bin = cut(!!as.name(prob_var), 
+                    breaks = breaks,
+                    include.lowest = TRUE)
+    ) %>%
+    group_by(prob_bin, .drop=FALSE) %>%
+    summarise(mean_prob = mean(!!as.name(prob_var)), mean_actual = mean(!!as.name(actual_var)), n = n())
+
+    p <- ggplot(data = binned_data) +
+      geom_line(aes(mean_prob, mean_actual), color= "red", size=0.6, show.legend = TRUE) +
+      geom_point(aes(mean_prob,mean_actual), color = "blue", size = 1, shape = 16, alpha = 0.7, show.legend=F, na.rm = TRUE) +
+      geom_segment(x=min(breaks), xend=max(breaks), y=min(breaks), yend=max(breaks), color=color[2], size=0.3) +
+      theme_bw() +
+      labs(x= "Predicted event probability",
+           y= y_lab) +
+      coord_cartesian(xlim=c(0,1), ylim=c(0,1))+
+      expand_limits(x = 0.01, y = 0.01) +
+      scale_y_continuous(expand=c(0.01,0.01),breaks=c(seq(0,1,0.1))) +
+      scale_x_continuous(expand=c(0.01,0.01),breaks=c(seq(0,1,0.1))) 
+    p
+}
+
+create_calibration_plot(data_holdout, 
+  prob_var = "best_logit_no_loss_pred", 
+  actual_var = "fast",
+  n_bins = 10)
+
+```
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+FP=1
+FN=10
+cost = FN/FP
+# the prevalence, or the proportion of cases in the population (n.cases/(n.controls+n.cases))
+prevelance = sum(data_train$comp_growth)/length(data_train$comp_growth)
+
+# Draw ROC Curve and find optimal threshold with loss function --------------------------
+
+best_tresholds <- list()
+expected_loss <- list()
+logit_cv_rocs <- list()
+logit_cv_threshold <- list()
+logit_cv_expected_loss <- list()
+
+for (model_name in names(logit_models)) {
+
+  model <- logit_models[[model_name]]
+  colname <- paste0(model_name,"_prediction")
+
+  best_tresholds_cv <- list()
+  expected_loss_cv <- list()
+
+  for (fold in c("Fold1", "Fold2", "Fold3", "Fold4", "Fold5")) {
+    cv_fold <-
+      model$pred %>%
+      filter(Resample == fold)
+
+    roc_obj <- roc(cv_fold$obs, cv_fold$fast)
+    best_treshold <- coords(roc_obj, "best", ret="all", transpose = FALSE,
+                            best.method="youden", best.weights=c(cost, prevelance))
+    best_tresholds_cv[[fold]] <- best_treshold$threshold
+    expected_loss_cv[[fold]] <- (best_treshold$fp*FP + best_treshold$fn*FN)/length(cv_fold$fast)
+  }
+
+  # average
+  best_tresholds[[model_name]] <- mean(unlist(best_tresholds_cv))
+  expected_loss[[model_name]] <- mean(unlist(expected_loss_cv))
+
+  # for fold #5
+  logit_cv_rocs[[model_name]] <- roc_obj
+  logit_cv_threshold[[model_name]] <- best_treshold
+  logit_cv_expected_loss[[model_name]] <- expected_loss_cv[[fold]]
+
+  }
+
+logit_summary2 <- data.frame("Avg of optimal thresholds" = unlist(best_tresholds),
+                             "Threshold for Fold5" = sapply(logit_cv_threshold, function(x) {x$threshold}),
+                             "Avg expected loss" = unlist(expected_loss),
+                             "Expected loss for Fold5" = unlist(logit_cv_expected_loss))
+
+logit_summary2 %>% kbl(caption = "<center><strong> Average RMSE and average AUC for 6 Models</strong></center>", escape = FALSE) %>%
+  kable_classic(full_width = F, html_font = "Cambria") %>%
+  kable_styling( position = "center")
+```
+
+
+```{r,echo = FALSE, warning = FALSE, message = FALSE}
+
+for (model_name in names(logit_cv_rocs)) {
+
+  r <- logit_cv_rocs[[model_name]]
+  best_coords <- logit_cv_threshold[[model_name]]
+  createLossPlot(r, best_coords,
+                 paste0(model_name, "_loss_plot"))
+  createRocPlotWithOptimal(r, best_coords,
+                           paste0(model_name, "_roc_plot"))
+}
+```
+
+```{r,echo = FALSE, warning = FALSE, message = FALSE}
+# Pick best model based on average expected loss ----------------------------------
+
+best_logit_with_loss <- logit_models[["Model 1"]]
+best_logit_optimal_treshold <- best_tresholds[["Model 1"]]
+
+logit_predicted_probabilities_holdout <- predict(best_logit_with_loss, newdata = data_holdout, type = "prob")
+data_holdout[,"best_logit_with_loss_pred"] <- logit_predicted_probabilities_holdout[,"fast"]
+
+# ROC curve on holdout
+roc_obj_holdout <- roc(data_holdout$comp_growth, data_holdout[, "best_logit_with_loss_pred", drop=TRUE])
+
+# Get expected loss on holdout
+holdout_treshold <- coords(roc_obj_holdout, x = best_logit_optimal_treshold, input= "threshold",
+                           ret="all", transpose = FALSE)
+expected_loss_holdout <- (holdout_treshold$fp*FP + holdout_treshold$fn*FN)/length(data_holdout$comp_growth)
+expected_loss_holdout
+
+# Confusion table on holdout with optimal threshold
+holdout_prediction <-
+  ifelse(data_holdout$best_logit_with_loss_pred < best_logit_optimal_treshold, "slow", "fast") %>%
+  factor(levels = c("slow", "fast"))
+cm_object3 <- confusionMatrix(holdout_prediction,data_holdout$comp_growth_f)
+cm3 <- cm_object3$table
+cm3
+```
+
+## Random Forest
+
+ We also experimented with Random Forest model to predict class probabilities and make classification decisions. We included all the variables excluding any polynomials, winsorized variables and flagged variables for extreme values. This helps us because Random Forest helps us to approximate the most important non linearities and interactions. We used the default option of 500 trees and set a minimum observations per terminal node (min.node.size) as 5,10, and 15. For number of variables to be used at each split (mtree), we set the values as 4,6, and 8 and then ran the setup to find the most optimal set of tuning parameters using cross validation. We received the lowest RMSE of 
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+train_control <- trainControl(
+  method = "cv",
+  n = 5,
+  classProbs = TRUE, # same as probability = TRUE in ranger
+  summaryFunction = twoClassSummaryExtended,
+  savePredictions = TRUE
+)
+train_control$verboseIter <- TRUE
+
+tune_grid <- expand.grid(
+  .mtry = c(4, 6, 8),
+  .splitrule = "gini",
+  .min.node.size = c(5,10, 15)
+)
+
+# getModelInfo("ranger")
+set.seed(13505)
+rf_model_p <- train(
+  formula(paste0("comp_growth_f ~ ", paste0(rfvars , collapse = " + "))),
+  method = "ranger",
+  data = data_train,
+  tuneGrid = tune_grid,
+  trControl = train_control,
+  na.action=na.exclude
+)
+
+#a <- lm(formula(paste0("comp_growth ~", paste0(rfvars, collapse = " + "))),data)
+#a$rank-1
+
+rf_model_p$results
+best_mtry <- rf_model_p$bestTune$mtry
+best_min_node_size <- rf_model_p$bestTune$min.node.size
+```
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+CV_RMSE_folds[["rf_p"]] <- rf_model_p$resample[,c("Resample", "RMSE")]
+
+auc <- list()
+for (fold in c("Fold1", "Fold2", "Fold3", "Fold4", "Fold5")) {
+  cv_fold <-
+    rf_model_p$pred %>%
+    filter(Resample == fold)
+  
+  roc_obj <- roc(cv_fold$obs, cv_fold$fast)
+  auc[[fold]] <- as.numeric(roc_obj$auc)
+}
+
+CV_AUC_folds[["rf_p"]] <- data.frame("Resample" = names(auc),
+                                     "AUC" = unlist(auc))
+
+CV_RMSE[["rf_p"]] <- mean(CV_RMSE_folds[["rf_p"]]$RMSE)
+CV_AUC[["rf_p"]] <- mean(CV_AUC_folds[["rf_p"]]$AUC)
+
+# Now use loss function and search for best thresholds and expected loss over folds -----
+best_tresholds_cv <- list()
+expected_loss_cv <- list()
+
+for (fold in c("Fold1", "Fold2", "Fold3", "Fold4", "Fold5")) {
+  cv_fold <-
+    rf_model_p$pred %>%
+    filter(mtry == best_mtry,
+           min.node.size == best_min_node_size,
+           Resample == fold)
+  
+  roc_obj <- roc(cv_fold$obs, cv_fold$fast)
+  best_treshold <- coords(roc_obj, "best", ret="all", transpose = FALSE,
+                          best.method="youden", best.weights=c(cost, prevelance))
+  best_tresholds_cv[[fold]] <- best_treshold$threshold
+  expected_loss_cv[[fold]] <- (best_treshold$fp*FP + best_treshold$fn*FN)/length(cv_fold$fast)
+}
+
+# average
+best_tresholds[["rf_p"]] <- mean(unlist(best_tresholds_cv))
+expected_loss[["rf_p"]] <- mean(unlist(expected_loss_cv))
+
+
+rf_summary <- data.frame("CV RMSE" = CV_RMSE[["rf_p"]],
+                         "CV AUC" = CV_AUC[["rf_p"]],
+                         "Avg of optimal thresholds" = best_tresholds[["rf_p"]],
+                         "Threshold for Fold5" = best_treshold$threshold,
+                         "Avg expected loss" = expected_loss[["rf_p"]],
+                         "Expected loss for Fold5" = expected_loss_cv[[fold]])
+
+rf_summary %>% kbl(caption = "<center><strong> Average RMSE and average AUC for 6 Models</strong></center>", escape = FALSE) %>%
+  kable_classic(full_width = F, html_font = "Cambria") %>%
+  kable_styling( position = "center")
+```
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+# Create plots - this is for Fold5
+
+createLossPlot(roc_obj, best_treshold, "rf_p_loss_plot")
+createRocPlotWithOptimal(roc_obj, best_treshold, "rf_p_roc_plot")
+
+# Take model to holdout and estimate RMSE, AUC and expected loss ------------------------------------
+
+rf_predicted_probabilities_holdout <- predict(rf_model_p, newdata = data_holdout, type = "prob")
+data_holdout$rf_p_prediction <- rf_predicted_probabilities_holdout[,"fast"]
+RMSE(data_holdout$rf_p_prediction, data_holdout$comp_growth)
+
+# ROC curve on holdout
+roc_obj_holdout <- roc(data_holdout$comp_growth, data_holdout[, "rf_p_prediction", drop=TRUE])
+
+# AUC
+as.numeric(roc_obj_holdout$auc)
+
+# Get expected loss on holdout with optimal threshold
+holdout_treshold <- coords(roc_obj_holdout, x = best_tresholds[["rf_p"]] , input= "threshold",
+                           ret="all", transpose = FALSE)
+expected_loss_holdout <- (holdout_treshold$fp*FP + holdout_treshold$fn*FN)/length(data_holdout$comp_growth)
+expected_loss_holdout
+```
+
+```{r}
+# Show expected loss with classification RF and default majority voting to compare
+
+train_control <- trainControl(
+  method = "cv",
+  n = 5
+)
+train_control$verboseIter <- TRUE
+
+set.seed(13505)
+rf_model_f <- train(
+  formula(paste0("default_f ~ ", paste0(rfvars , collapse = " + "))),
+  method = "ranger",
+  data = data_train,
+  tuneGrid = tune_grid,
+  trControl = train_control
+)
+
+data_train$rf_f_prediction_class <-  predict(rf_model_f,type = "raw")
+data_holdout$rf_f_prediction_class <- predict(rf_model_f, newdata = data_holdout, type = "raw")
+
+#We use predicted classes to calculate expected loss based on our loss fn
+fp <- sum(data_holdout$rf_f_prediction_class == "default" & data_holdout$default_f == "slow")
+fn <- sum(data_holdout$rf_f_prediction_class == "no_default" & data_holdout$default_f == "fast")
+(fp*FP + fn*FN)/length(data_holdout$default)
+
+
+# Summary results ---------------------------------------------------
+
+nvars[["rf_p"]] <- length(rfvars)
+
+summary_results <- data.frame("Number of predictors" = unlist(nvars),
+                              "CV RMSE" = unlist(CV_RMSE),
+                              "CV AUC" = unlist(CV_AUC),
+                              "CV threshold" = unlist(best_tresholds),
+                              "CV expected Loss" = unlist(expected_loss))
+
+model_names <- c("Logit Model 1", "Logit Logit Model 2",
+                 "Logit LASSO","RF probability")
+summary_results <- summary_results %>%
+  filter(rownames(.) %in% c("Model 1", "Model 2", "LASSO", "rf_p"))
+rownames(summary_results) <- model_names
+
+```
+
+
+## Conclusion
+
+

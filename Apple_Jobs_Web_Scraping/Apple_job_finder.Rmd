@@ -1,0 +1,81 @@
+---
+title: "Web Scraping Homework 1"
+author: "Fasih Atif (2001385)"
+date: "`r Sys.Date()`"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+**Introduction** \
+I have created a web scrapper function that scraps open job positions from Apples websites according to the input keyword and page limit.
+
+1.  **Installation of relevant libraries**
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+library(tidyverse)
+library(data.table)
+library(rvest)
+```
+
+2.  **Create function for web scrapper**
+
+```{r, ECHO = FALSE, MESSAGE = FALSE, WARNING = FALSE, RESULTS = FALSE}
+job_finder <- function(jobtitle,pages){
+  
+  job_scrapper <- function(my_url){
+    
+    url <- read_html(my_url)
+    
+    links <- url %>% 
+      html_nodes('.table--advanced-search__title') %>%
+      html_attr('href')
+    
+    
+    titles <- url %>%
+      html_nodes('.table--advanced-search__title') %>%
+      html_text()
+    
+    
+    department <- url %>%
+      html_nodes('.table--advanced-search__role') %>%
+      html_text()
+    
+    date_posted <- url %>%
+      html_nodes('.table--advanced-search__date') %>%
+      html_text()
+    
+    job_location <- url %>%
+      html_nodes('.table-col-2 span') %>%
+      html_text()
+    
+    df <- data.frame('title' = titles, 'department' = department, 'location' = job_location,'date posted' = date_posted, 'link' = links)
+    return(df)
+    }
+  
+  
+  url_list <- paste0('https://jobs.apple.com/en-us/search?location=united-states-USA&sort=relevance&search=',jobtitle,'&page=',1:pages)
+  
+  df_list <- lapply(url_list,job_scrapper)
+  
+  database <- rbindlist(df_list)
+  database <<- database
+  write.csv(database,"apple_jobs.csv")
+  saveRDS(database, file = "apple_jobs.rds")
+  
+}
+```
+
+3.  **We test the function**
+
+```{r, ECHO = FALSE, MESSAGE = FALSE, WARNING = FALSE, RESULTS = FALSE}
+job_finder('cloud',2) ## Please close the excel file before trying to run again with new search parameters
+```
+
+4.  **We display the produced result here along with a written csv file**
+
+```{r}
+library(knitr)
+kable(database)
+```

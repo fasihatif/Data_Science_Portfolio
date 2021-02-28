@@ -1,0 +1,387 @@
+---
+title: "<center>CH16-5 DATA EXERCISE<center>"
+author: "<center>Fasih Atif<center>"
+date: "<center>2/4/2021<center>"
+output:
+ html_document:
+   code_download: true
+---
+
+The task for this exercise was to carry out a hotel price prediction using the random forest model. We used the 'europe-hotels' data set and filtered for hotels and the month of February 2018. Our original data set contained 149966 observations and 24 variables. We had to carry out some necessary data cleaning to mold the data into a shape that we could use for analysis. Since i felt that we had enough observations, i decided to drop rows with missing values which numbered to around 200 approximately. I removed symbols and words for columns which were going to be used in a numeric format. I renamed columns for easier use and understanding, and dropped columns which were of no use to me or had been transformed. I also converted the columns such as country and city into factor variables. After all the data cleaning, my data consisted of 9390 observations and 17 variables.
+
+```{r import libraries, include = FALSE, warning = FALSE, message = FALSE}
+# Import libraries
+library(rmdformats)
+library(caret)
+library(ranger)
+library(kableExtra)
+library(Metrics)
+library(scales)
+library(rattle)
+library(tidyverse)
+library(dplyr)
+
+```
+
+```{r import file, include = FALSE, message = FALSE, warning = FALSE}
+# Import hotels-europe file
+data <- read.csv('https://raw.githubusercontent.com/fasihatif/Data-Analysis-1-2-3/master/Data_Analysis_3/atif-fasih_da3_data-exercise/CH16-Q5/data/raw/hotelbookingdata.csv')
+
+```
+
+```{r data cleaning, include = FALSE, message = FALSE, warning = FALSE}
+backup1 <- data
+data <- backup1
+
+# distance to center entered as string in miles with one decimal
+data$distance <- as.numeric(gsub("[^0-9\\.]","",data$center1distance))
+data$distance_alter <- as.numeric(gsub("[^0-9\\.]","",data$center2distance))
+
+# parsing accommodationtype column
+# replace missing values to handle split
+data[data$accommodationtype == "_ACCOM_TYPE@",]$accommodationtype <- "_ACCOM_TYPE@NA"
+data$accommodation_type <- unlist(sapply(strsplit(as.character(data$accommodationtype), "@"), '[[', 2))
+data$accommodationtype <- NULL
+
+# Remove '/5' from the end of ratings
+data$rating <- as.numeric(gsub("/5","",data$guestreviewsrating))
+
+# look at key vars
+colnames(data)[colnames(data)=="starrating"] <- "stars"
+table(data$stars)
+data$stars[data$stars == 0] <- NA
+
+# drop if hotel id is missing
+data <- data[!is.na(data$hotel_id), ]
+
+# DROP PERFECT DUPLICATES
+data[duplicated(data)==T,]
+#these are perfect duplicates of the observation in the previous row
+data <- data[!duplicated(data), ]
+
+# Rename variables
+data <- data %>% mutate(avg_rating_ta = rating2_ta)
+data <- data %>% mutate(rating_count_ta = rating2_ta_reviewcount)
+data <- data %>% mutate(rating_count = rating_reviewcount)
+
+# drop vars
+data$center2distance <-  NULL
+data$center1distance <-  NULL
+data$center1label <- NULL
+data$center2label <- NULL
+data$rating2_ta <- NULL
+data$rating2_ta_reviewcount <- NULL
+data$price_night <- NULL
+data$guestreviewsrating <- NULL
+data$s_city <- NULL
+data$offer <- NULL
+data$offer_cat <- NULL
+data$neighbourhood <- NULL
+data$rating_reviewcount <- NULL
+
+count_missing_values <- function(data) {
+  num_missing_values <- map_int(data, function(x) sum(is.na(x)))
+  num_missing_values[num_missing_values > 0]
+}
+
+count_missing_values(data)
+
+# Filter data
+data <- data %>% filter(data$accommodation_type == 'Hotel' )
+data <- data %>% filter(year == 2018)
+data <- data %>% filter(month == 2)
+
+
+# Convert columns to factor
+data <- data %>%
+  mutate(f_city = factor(city_actual),
+          f_country = factor(addresscountryname))
+
+data$city_actual <- NULL
+data$addresscountryname <- NULL
+
+data <- data[complete.cases(data), ]
+
+```
+
+## Random Forest
+
+I setup two equations to be used in our random forest model:
+
+
+```{r rf_equations, echo = FALSE, warning = FALSE, message = FALSE}
+m1_rf <- "= stars, distance, distance_alter, f_city, f_country"
+
+m2_rf <- "= M1 + scarce_room, weekend, holiday, rating, rating_count, avg_rating_ta, rating_count_ta"
+
+model_variables_rf <- c(m1_rf,m2_rf)
+
+model_names_rf <- c("M1", "M2")
+
+model_table_rf <- as.data.frame(cbind(model_names_rf, model_variables_rf))
+
+model_headings_rf <- c("Model", "Predictor Variables")
+
+colnames(model_table_rf) <- model_headings_rf
+
+model_table_rf %>%
+  kbl(caption = "<center><strong>Versions of the Airbnb Apartment Price Prediction Models for Random Forest</strong></center>", escape = FALSE) %>%
+  kable_classic(full_width = F, html_font = "Cambria") %>%
+  kable_styling( position = "center")
+
+```
+
+
+```{r random forest, include = FALSE, message = FALSE, warning = FALSE}
+
+n_var <- c("stars", "distance", "distance_alter")
+d_var <- c("scarce_room", "weekend", "holiday")
+f_var <- c("f_city","f_country")
+ratings_var <- c("rating", "rating_count", "avg_rating_ta", "rating_count_ta")
+
+rf_formula1 <- as.formula(paste("price ~ ",paste(c(n_var,f_var),collapse = " + ")))
+rf_formula2 <- as.formula(paste("price ~ ",paste(c(n_var,f_var, d_var, ratings_var),collapse = " + ")))
+
+
+train_indices <- as.integer(createDataPartition(data$price, p = 0.7, list = FALSE))
+data_train <- data[train_indices, ]
+data_holdout <- data[-train_indices, ]
+
+
+# Model setup same for all Random Forest models
+# do 5-fold CV
+train_control <- trainControl(method = "cv",
+                              number = 5,
+                              verboseIter = FALSE)
+
+
+# ----------- RF Model 1----------#
+
+#Calculate no of variables for mtry
+lm_coeff <- lm(rf_formula1, data_train)
+lm_coeff$rank -1 #4 variables
+
+
+# Model tuning for Model RF model 1
+# set tuning
+tune_grid_1 <- expand.grid(
+  .mtry = c(20,22,24),
+  .splitrule = "variance",
+  .min.node.size = c(5,10,15)
+)
+
+# Train Model 1
+
+set.seed(1234)
+
+rf_model_1 <- train(
+  rf_formula1,
+  data = data_train,
+  method = "ranger",
+  trControl = train_control,
+  tuneGrid = tune_grid_1,
+  importance = "impurity"
+)
+
+# ----------- RF Model 2----------#
+
+#Calculate no of variables for mtry
+lm_coeff_2 <- lm(rf_formula2, data_train)
+lm_coeff_2$rank -1 #5 variables
+
+
+# Model tuning for Model RF model 2
+# set tuning
+tune_grid_2 <- expand.grid(
+  .mtry = c(20,22,24),
+  .splitrule = "variance",
+  .min.node.size = c(5,10,15)
+)
+
+# Train Model 2
+
+set.seed(1234)
+rf_model_2 <- train(
+  rf_formula2,
+  data = data_train,
+  method = "ranger",
+  trControl = train_control,
+  tuneGrid = tune_grid_2,
+  importance = "impurity"
+)
+
+# Predict Holdout RMSE
+rf_holdout_pred <- predict(rf_model_2, data_holdout)
+rf_holdout_rmse <- RMSE(data_holdout$price, rf_holdout_pred) #RMSE:96.38512
+
+```
+
+We setup two Random forest models for our two equations. For the first model, we set our number of variables (mtry) as in the range of 20-24 since as a rule of thumb the mtry should be square root of total number of variables (488) in the equation. The minimum end node size was taken as 5,10, and 15. The number of bootstrap sample draws was taken as default which is 500. I then ran the model to check which combination of our tuning parameters would give us the lowest RMSE. The results are shown below:
+
+
+```{r rmse combinations, include = FALSE, message = FALSE, warning = FALSE}
+
+# Show Model 1 rmse shown with all the combinations
+rf_tuning_model1 <- rf_model_1$results %>%
+  dplyr::select(mtry, min.node.size, RMSE) %>%
+  dplyr::rename(nodes = min.node.size) %>%
+  spread(key = mtry, value = RMSE)
+
+
+rf_tuning_model1_table <- rf_tuning_model1 %>% kbl(caption = "<center><strong>Random Forest RMSE by tuning parameters (Model 1)</strong></center>", escape = FALSE) %>%
+  kable_classic(full_width = F, html_font = "Cambria") %>%
+  kable_styling( position = "center")
+
+
+rf_tuning_model2 <- rf_model_2$results %>%
+  dplyr::select(mtry, min.node.size, RMSE) %>%
+  dplyr::rename(nodes = min.node.size) %>%
+  spread(key = mtry, value = RMSE)
+
+rf_tuning_model2_table <- rf_tuning_model2 %>% kbl(caption = "<center><strong>Random Forest RMSE by tuning parameters (Model 2)</strong></center>", escape = FALSE) %>%
+  kable_classic(full_width = F, html_font = "Cambria") %>%
+  kable_styling( position = "center")
+
+```
+
+
+```{r tuning table 1, echo = FALSE, message = FALSE, warning = FALSE}
+rf_tuning_model1_table
+```
+
+For the second model, we set our number of variables (mtry) as in the range of 20-24 as well since as a rule of thumb the mtry should be square root of total number of variables (492) in the equation. The minimum end node size was taken as 5,10,and 15. The number of bootstrap sample draws was taken as default which is 500. I then ran the model to check which combination of our tuning parameters would give us the lowest RMSE. The results are shown as the following:
+
+
+```{r tuning table 2, echo = FALSE, message = FALSE, warning = FALSE}
+rf_tuning_model2_table
+```
+
+
+We split our data into 70% as training set for cross validation and 30% as holdout set. The optimal set of tuning parameters were then used to fit each model to the training data. The models gave the following RMSE on each fold in each model:
+
+```{r rf model_rmse, echo = FALSE, warning = FALSE, message = FALSE}
+
+results <- resamples(
+  list(
+    model_1  = rf_model_1,
+    model_2  = rf_model_2
+  )
+)
+
+
+# RMSE fold results for all models
+model1_rf_rmse <- as.matrix(round(results$values$`model_1~RMSE`,3))
+model2_rf_rmse <- as.matrix(round(results$values$`model_2~RMSE`,3))
+mean_rf_rmse <- c(mean(model1_rf_rmse), mean(model2_rf_rmse))
+
+model_rf_rmse_table <- as.data.frame(cbind(model1_rf_rmse,model2_rf_rmse))
+colnames(model_rf_rmse_table) <- c("Model 1", "Model 2")
+model_rf_rmse_table <- rbind(model_rf_rmse_table,mean_rf_rmse)
+rownames(model_rf_rmse_table) <- c("Fold 1", "Fold 2", "Fold 3", "Fold 4", "Fold 5", "Average")
+
+model_rf_rmse_table %>% kbl(caption = "<center><strong>RMSE fold results for all models</strong></center>", escape = FALSE) %>%
+  kable_classic(full_width = F, html_font = "Cambria") %>%
+  kable_styling( position = "center")
+
+```
+
+
+The best model was model 2 which had a training RMSE of 88.34. We used this model on the holdout set to predict prices and got holdout RMSE of 96.38. It means we can expect to make an error of $96.38 when using our model on the live data on the assumption that the external validity is high.
+
+
+### Variable Importance
+
+In random forests, there can be a lot of trees that are grown in a correlated fashion and each can grow very large. So unlike linear regression coefficients, its not possible to understand the relationship between target and explanatory variables. In its place, we can use a diagnostic tool like Variable Importance charts. We run model 2 on the holdout set and produce the following two Variable Importance charts:
+
+
+**Top 10 Variable Importance**
+
+The top 10 variable importance charts show the top predictors with the largest average MSE reduction. The most important predictors are stars, guest rating, tripadvisor ratings and count etc. 
+
+
+```{r variable importance top 10, echo = FALSE, warning = FALSE, message = FALSE}
+
+group.importance <- function(rf.obj, groups) {
+  var.imp <- as.matrix(sapply(groups, function(g) {
+    sum(importance(rf.obj)[g], na.rm = TRUE)
+  }))
+  colnames(var.imp) <- "MeanDecreaseGini"
+  return(var.imp)
+}
+
+
+rf_model_2_var_imp <- ranger::importance(rf_model_2$finalModel)/1000
+rf_model_2_var_imp_df <-
+  data.frame(varname = names(rf_model_2_var_imp),imp = rf_model_2_var_imp) %>%
+  arrange(desc(imp)) %>%
+  mutate(imp_percentage = imp/sum(imp))
+
+
+# have a version with top 10 vars only
+rf_model_2_var_imp_plot_b <- ggplot(rf_model_2_var_imp_df[1:10,], aes(x=reorder(varname, imp), y=imp_percentage)) +
+  geom_point(color= "cyan3", size=2) +
+  geom_segment(aes(x=varname,xend=varname,y=0,yend=imp_percentage), color= "cyan3", size=1) +
+  ylab("Importance (Percent)") +
+  xlab("Variable Name") +
+  coord_flip() +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  theme_bw() +
+  theme(axis.text.x = element_text(size=8), axis.text.y = element_text(size=8),
+        axis.title.x = element_text(size=7), axis.title.y = element_text(size=7)) +
+  labs(title = "Top 10 Imp Variables")
+
+rf_model_2_var_imp_plot_b
+```
+
+
+**Grouped Variable Importance**
+
+In this chart, we have grouped all city variables together. From this chart, the most important predictors for pricing are city, stars, country, rating, and tripadvisor rating count etc.
+
+
+```{r variable importance grouped, echo = FALSE, warning = FALSE, message = FALSE}
+
+group.importance <- function(rf.obj, groups) {
+  var.imp <- as.matrix(sapply(groups, function(g) {
+    sum(ranger::importance(rf.obj)[g], na.rm = TRUE)
+  }))
+  colnames(var.imp) <- "MeanDecreaseGini"
+  return(var.imp)
+}
+
+
+varnames <- rf_model_2$finalModel$xNames
+f_city_group <- grep("f_city",varnames, value = TRUE)
+f_country_group <- grep("f_country",varnames, value = TRUE)
+
+
+groups <- list(f_city = f_city_group,
+               f_country = f_country_group,
+               stars="stars",
+               ratings="ratings",
+               distance="distance",
+               distance_alter="distance_alter",
+               rating_count="rating_count",
+               rating_count_ta = "rating_count_ta")
+
+rf_model_2_var_imp_grouped <- group.importance(rf_model_2$finalModel, groups)
+rf_model_2_var_imp_grouped_df <- data.frame(varname = rownames(rf_model_2_var_imp_grouped),
+                                            imp = rf_model_2_var_imp_grouped[,1])  %>%
+  mutate(imp_percentage = imp/sum(imp))
+
+rf_model_2_var_imp_grouped_plot <-
+  ggplot(rf_model_2_var_imp_grouped_df, aes(x=reorder(varname, imp), y=imp_percentage)) +
+  geom_point(color="cyan3", size=2) +
+  geom_segment(aes(x=varname,xend=varname,y=0,yend=imp_percentage), color="cyan3", size=1) +
+  ylab("Importance (Percent)") +   xlab("Variable Name") +
+  coord_flip() +
+  # expand=c(0,0),
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  theme_bw() +
+  theme(axis.text.x = element_text(size=8), axis.text.y = element_text(size=8),
+        axis.title.x = element_text(size=7), axis.title.y = element_text(size=7)) +
+  labs(title = "Grouped Imp Variables")
+
+rf_model_2_var_imp_grouped_plot
+
+```

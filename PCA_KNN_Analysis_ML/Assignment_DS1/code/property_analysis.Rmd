@@ -1,0 +1,692 @@
+---
+title: 'Data Science 1: Machine Learning Concepts Assignment'
+author: "Fasih Atif"
+date: "2/20/2021"
+output:
+  html_document:
+    rmdformats::robobook
+---
+
+```{r load libraries, include = FALSE, message = FALSE, warning = FALSE}
+library(skimr)
+library(caret)
+library(kableExtra)
+library(Metrics)
+library(glmnet)
+library(coefplot)
+library(ggpubr)
+library(scales)
+library(GGally)
+library(datasets)
+library(NbClust) 
+library(ggrepel)
+library(FactoMineR)
+library(factoextra)
+library(tidyverse)
+```
+
+```{r import data, include = FALSE, message = FALSE, warning = FALSE}
+data <- readRDS(url('http://www.jaredlander.com/data/manhattan_Train.rds')) %>%
+  drop_na()
+```
+
+# 1. Supervised learning with penalized models and PCA
+
+## Data
+
+The goal for this question is to predict the property values (lot value + building value) of the properties in Manhattan New York. I have used the 'Housing Development' data set that is borrowed from the 'R for Everyone' book by Jared Lander. The dataset has a single table that includes 31746 observations. The data contains 46 variables that describe the various characteristics of the property in terms of location , size, features, and area. The target variable is logarithm of total property value in Dollars. The data was already cleaned and had no NA's.
+
+## a. Exploratory Data Analysis
+
+I started with carrying out some exploratory data analysis. I analyzed the distribution of Property Values via a histogram and observed a strongly skewed graph with a right long tail. Hence, to normalize the distribution, I plotted the logarithmic of total property value:
+
+```{r, include = FALSE, message = FALSE, warning = FALSE}
+data <- data %>% mutate(
+      logUnitsRes = ifelse(UnitsRes == 0 , 0, log(UnitsRes)),
+      logUnitsTotal = ifelse(UnitsTotal == 0 , 0, log(UnitsTotal)),
+      logNumFloors = ifelse(NumFloors == 0 , 0, log(NumFloors)),
+      logNumBldgs = ifelse(NumBldgs == 0 , 0, log(NumBldgs)),
+      logLotArea = ifelse(LotArea == 0 , 0, log(LotArea)), 
+      logBldgArea = ifelse(BldgArea == 0 , 0, log(BldgArea)),
+      logOtherArea = ifelse(OtherArea == 0 , 0, log(OtherArea)),
+      logFactryArea = ifelse(FactryArea == 0 , 0, log(FactryArea)),
+      logStrgeArea = ifelse(StrgeArea == 0 , 0, log(StrgeArea)),
+      logOfficeArea = ifelse(OfficeArea == 0 , 0, log(OfficeArea)),
+      logGarageArea = ifelse(GarageArea == 0 , 0, log(GarageArea)), 
+      logRetailArea = ifelse(RetailArea == 0 , 0, log(RetailArea)),
+      logLotFront = ifelse(LotFront == 0 , 0, log(LotFront)),
+      logResArea = ifelse(ResArea == 0 , 0, log(ResArea)),
+      logBuiltFAR = ifelse(BuiltFAR == 0 , 0, log(BuiltFAR)),
+      logTotalValue = log(TotalValue)
+)
+
+
+```
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+prop_value <- ggplot(data, aes( x = TotalValue)) + geom_histogram(aes(y = (..count..)/sum(..count..)),fill = "orangered1", color = "black") + theme_bw() + scale_y_continuous(labels = label_percent()) + ylab("Percent") + xlab("Price (US$)")
+
+
+ln_prop_value <- ggplot(data, aes( x = logTotalValue)) + geom_histogram(aes(y = (..count..)/sum(..count..)),fill = "orangered1", color = "black") + theme_bw() + scale_y_continuous(labels = label_percent()) + ylab("Percent") + xlab("ln(Price, US$)")
+
+
+prop_value_pairs <- ggarrange(prop_value, ln_prop_value,  nrow = 1)
+
+annotate_figure(prop_value_pairs, bottom = text_grob("Data source: R for Everyone by Jared Langer", color = "black",vjust = 0.5,hjust = 1, x = 1, face = "italic", size = 10))
+```
+
+I also took log of some other variables which appeared skewed and normalized them through taking logarithms. We explore some scatter plots and further distributions of some explanatory variables in **Figure 1** andcorrelation between all the explanatory variables in **Figure 2** in the Appendix.
+
+```{r ggpair,fig.width=8,fig.height=8, include=FALSE, message=FALSE, warning=FALSE}
+ggpairs_chart <- ggpairs(data, columns = c("logTotalValue", "logBldgArea", "logNumFloors", "logResArea", "logBuiltFAR", "logUnitsTotal", "logUnitsRes"))
+
+```
+
+```{r correlation matrix chart, include = FALSE, message = FALSE, warning = FALSE, fig.width= 9, fig.height=10}
+corr_chart <- ggcorr(data, legend.position = "bottom", label = TRUE, label_size = 2.2, nudge_x = -1.5)
+
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# Convert some variables into factors
+
+data <- data %>% mutate(Council = factor(Council),
+PolicePrct = factor(PolicePrct),
+HealthArea = factor(HealthArea))
+```
+
+## b. Building Regression Models
+
+I have used the Forward Selection approach to construct several models and then use the Cross Validation Root Mean Squared Error (RMSE) Loss function to determine which selection of group of variables gives us the best predictive performance. I constructed 3 OLS models using forward approach in which we add more variables increasing model complexity. The first OLS model is based on the coefficient correlation chart as a base benchmark model. I have included those explanatory variables which have the highest correlation with the target variable (logTotalValue).
+
+The problem with using correlations as a basis of choosing explanatory variables can result in omitted variable bias. A variable (x1) when analyzed individually might show strong correlation with the target variable(y) but it can be correlated with another independent variable (x2) as well. In isolation we see that the X1 is a good predictor of y but once the effects of x2 are partialled out by including x2 in the model, no such relationship remains.
+
+To construct the formula of the second model, I used domain knowledge to add explanatory variables which are considered most important in valuing a property. For the 3rd OLS Model, I included all variables (excluding ID, TotalValue, ZoneDist3, ZoneDist4) as a complete model to be able to compare other models that we will run using Regularization algorithms. For the readers convenience, I have written down the variables to be used in each model below:
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+
+ols_formula1 <- "logTotalValue ~ logBldgArea + logNumFloors + logBuiltFAR + logLotFront + logLotArea + logUnitsTotal + BuiltFAR + NumFloors + BldgArea"
+
+ols_formula2 <- "logTotalValue ~ LandUse + LotArea + BldgArea + NumFloors + UnitsRes + UnitsTotal + Proximity + IrregularLot + HistoricDistrict + ZoneDist1 +ZoneDist2 + LotDepth +BldgDepth + BasementType + logLotArea + logBldgArea + logNumFloors + logUnitsRes + logUnitsTotal"
+
+ols_formula3 <- "logTotalValue ~ SchoolDistrict + Council + FireService + PolicePrct + HealthArea + ZoneDist1  + ZoneDist2 + Class + LandUse + Easements + OwnerType + LotArea + BldgArea + ComArea + ResArea + OfficeArea + RetailArea + GarageArea + StrgeArea + FactryArea + OtherArea + NumBldgs + NumFloors + UnitsRes + UnitsTotal + LotFront + LotDepth + BldgFront + BldgDepth + Extension + Proximity + IrregularLot + LotType + BasementType + Landmark + BuiltFAR + ResidFAR + CommFAR + FacilFAR + Built + HistoricDistrict + High + logUnitsRes + logUnitsTotal + logNumFloors + logNumBldgs + logLotArea + logBldgArea + logOtherArea + logFactryArea + logStrgeArea + logOfficeArea + logGarageArea + logRetailArea + logLotFront+ logResArea + logBuiltFAR"
+
+ regularization_formula <- "logTotalValue ~ SchoolDistrict + Council + FireService + PolicePrct + HealthArea + ZoneDist1  + ZoneDist2 + Class + LandUse + Easements + OwnerType + LotArea + BldgArea + ComArea + ResArea + OfficeArea + RetailArea + GarageArea + StrgeArea + FactryArea + OtherArea + NumBldgs + NumFloors + UnitsRes + UnitsTotal + LotFront + LotDepth + BldgFront + BldgDepth + Extension + Proximity + IrregularLot + LotType + BasementType + Landmark + BuiltFAR + ResidFAR + CommFAR + FacilFAR + Built + HistoricDistrict + High + logUnitsRes + logUnitsTotal + logNumFloors + logNumBldgs + logLotArea + logBldgArea + logOtherArea + logFactryArea + logStrgeArea + logOfficeArea + logGarageArea + logRetailArea + logLotFront+ logResArea + logBuiltFAR -1"
+
+model_variables <- c(ols_formula1,ols_formula2,ols_formula3,regularization_formula)
+
+model_names <- c("OLS Model 1", "OLS Model 2", "OLS Model 3", "Regularization Models")
+
+model_table <- as.data.frame(cbind(model_names, model_variables))
+
+model_headings <- c("Model", "Predictor Variables")
+
+colnames(model_table) <- model_headings
+
+model_table %>%
+  kbl(caption = "<center><strong>Versions of the Total Valuation Prediction Models</strong></center>", escape = FALSE) %>%
+  kable_classic(full_width = F, html_font = "Cambria") %>%
+  kable_styling( position = "center") %>%  scroll_box(width = "100%", height = "350px")
+
+
+```
+
+We split our data randomly into 70/30 ratio with 30% used as holdout set while the remaining 70% will be used for Cross Validation training on 10 folds of train and validation sets.
+
+```{r Train Holdout set split, warning = FALSE, message = FALSE}
+set.seed(1234)
+train_indices <- as.integer(createDataPartition(data$logTotalValue, p = 0.70, list = FALSE))
+data_train <- data[train_indices, ]
+data_holdout <- data[-train_indices, ]
+```
+
+## c. OLS Linear Regression
+
+I trained and tested all the regression models using cross validation (CV) on the training set and calculated the R-squared, BIC, and the Root Mean Squared Error (RMSE). The results are shown below:
+
+```{r ols, include = FALSE, warning = FALSE, message = FALSE}
+train_control <- trainControl(
+  method = "cv",
+  number = 10)
+
+# Prepare model 1
+#---------------------
+set.seed(1234)
+ols_model1 <- caret::train(as.formula(ols_formula1),
+                            data = data_train,
+                            method = "lm",
+                            preProcess = c("center", "scale"),
+                            trControl = train_control,
+                            na.action=na.omit
+                          )
+
+summary(ols_model1)
+mean(ols_model1$resample$RMSE) # RMSE 0.9587221
+
+
+# Prepare model 2
+#---------------------
+set.seed(1234)
+ols_model2 <- caret::train(as.formula(ols_formula2),
+                            data = data_train,
+                            method = "lm",
+                            preProcess = c("center", "scale"),
+                            trControl = train_control,
+                            na.action=na.omit
+                          )
+
+summary(ols_model2)
+mean(ols_model2$resample$RMSE) # RMSE 0.8097555
+
+
+# Prepare model 3
+#---------------------
+set.seed(1234)
+ols_model3 <- caret::train(as.formula(ols_formula3),
+                            data = data_train,
+                            method = "lm",
+                            preProcess = c("center", "scale"),
+                            trControl = train_control,
+                            na.action=na.omit
+                          )
+
+summary(ols_model3)
+mean(ols_model3$resample$RMSE) # RMSE 0.525
+```
+
+```{r OLS fit measures, echo = FALSE, warning = FALSE, message = FALSE}
+#### Comparing Fit measures
+
+model_list <- c(ols_formula1,ols_formula2,ols_formula3)
+
+BIC <- NULL
+nvars <- NULL
+r2 <- NULL
+
+for(x in model_list){
+  model_work_data <- lm(x,data = data_train)
+  BIC <- c(BIC,round(BIC(model_work_data)))
+  nvars <- c(nvars, model_work_data$rank -1)
+  r2 <- c(r2,summary(model_work_data)$r.squared)
+}
+# Calculate RMSE for training set
+rmse_cv <- c(mean(ols_model1$resample$RMSE),mean(ols_model2$resample$RMSE), mean(ols_model3$resample$RMSE))
+
+# Bind all the different model results together
+model_results <- as.data.frame(cbind(nvars,r2,BIC,rmse_cv))
+
+# Convert all numeric columns to numeric data type
+model_results <- model_results %>% 
+  mutate_if(is.character, numeric)
+
+# Round all numeric columns to 2 digits if applicable
+model_results <- model_results %>% 
+  mutate_if(is.numeric, round, digits = 3)
+
+# Add model names to the model results table
+model_names <- c("OLS Model 1","OLS Model 2","OLS Model 3")
+model_results <- cbind(model_names,model_results)
+
+# Create column name list for model results table
+column_names <- c("Model", "N predictors", "R-squared", "BIC", "CV RMSE")
+colnames(model_results) <- column_names
+
+model_results %>%
+  kbl(caption = "<center><strong>Comparing Model Fit measures</strong></center>", escape = FALSE) %>%
+  kable_classic(full_width = F, html_font = "Cambria") %>%
+  kable_styling( position = "center")
+
+```
+
+The R-squared improves as we add more predictor variables into the models. Model 3 which contains all the variables as well the logs gives an R-square of 0.89 which means the that this model explains 89% of the variation in log total value. Model 3 provided the lowest BIC of the 3 models of 35823 (lower values of BIC indicate better performance). CV RMSE improves as we go from Model 1 to Model 3. Model 3 produces CV RMSE of 0.525 which makes it the best model out of the 3 OLS models in terms of providing the best predictive performance.
+
+## d. Regularization Methods
+
+### i. Lasso Regression
+
+Lasso is a model that penalizes models for complexity. We assign it a big set of predictors and the model returns with an estimated regression that has fewer coefficients. The missing coefficients are actually penalized and assigned a value of zero. For the variables that remain, it gives estimated coefficients. We use Cross validation to arrive at the λ value that can give us the lowest RMSE. In our analysis, the λ value of 0.0005 provided the lowest RMSE of 0.525 which puts it at par with OLS Model 3.
+
+```{r LASSO, include = FALSE, warning = FALSE, message = FALSE}
+
+options("scipen"=100)
+        
+# Set lasso tuning parameters
+train_control <- trainControl(
+  method = "cv",
+  number = 10)
+
+tenpowers <- 10^seq(-1, -3, by = -1)
+lasso_tune_grid <- expand.grid(
+  "alpha" = c(1),
+  "lambda" = c(tenpowers, tenpowers / 2) 
+)
+
+set.seed(1234)
+lasso_model <- caret::train(as.formula(regularization_formula),
+                            data = data_train,
+                            method = "glmnet",
+                            preProcess = c("center", "scale"),
+                            trControl = train_control,
+                            tuneGrid = lasso_tune_grid,
+                            na.action=na.exclude)
+
+# lambda 0.001
+
+lasso_coeffs <- coef(lasso_model$finalModel, lasso_model$bestTune$lambda) %>%
+  as.matrix() %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "variable") %>%
+  rename(coefficient = `1`)  # the column has a name "1", to be renamed
+
+# Evaluate model. CV error:
+lasso_cv_rmse <- lasso_model$results %>%
+  filter(lambda == lasso_model$bestTune$lambda) %>%
+  dplyr::select(RMSE)
+ # RMSE 0.525
+
+
+
+```
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+lasso_coeffs %>% kbl(caption = "<center><strong>Lasso Model Coefficients</strong></center>", escape = FALSE) %>%
+  kable_classic(full_width = F, html_font = "Cambria") %>%
+  kable_styling( position = "center") %>%  scroll_box(width = "100%", height = "350px")
+
+```
+
+The graph below shows how our RMSE varies across different λ values:
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+ggplot(lasso_model) + scale_x_log10() + theme_bw()
+```
+
+### ii. Ridge Regression
+
+Ridge regression shrinks the regression coefficients by imposing a penalty (λ) on their size. The ridge coefficients minimize a penalized residual sum of squares. The larger the value of λ, the greater the amount of shrinkage. However unlike Lasso, the coefficients are shrunk toward zero (and each other) but don't become zero. I again used Cross Validation to find the optimal λ value that can give us the lowest RMSE. The results showed that λ value of 0.1 gave us the lowest RMSE of 0.58. This result is similar to that of OLS Model 3 and Lasso regression.
+
+```{r Ridge, include= FALSE, warning = FALSE, message = FALSE}
+fit_control <- trainControl(method = "cv", number = 10)
+
+# ridge model
+ridge_tune_grid <- expand.grid(
+  "alpha" = c(0),
+  "lambda" = seq(0.001, 0.5, by = 0.025)
+)
+set.seed(1234)
+ridge_model <- train(
+  as.formula(regularization_formula),
+  data = data_train,
+  method = "glmnet",
+  preProcess = c("center", "scale"),
+  tuneGrid = ridge_tune_grid,
+  trControl = fit_control
+)
+
+ridge_model$bestTune # lambda 0.101 RMSE 0.536
+
+```
+
+The graph below shows how our RMSE varies across different λ values:
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+ggplot(ridge_model) + theme_bw()
+```
+
+### iii. Elastic Net Regression
+
+The application of the penalties differs for Lasso and Ridge. Lasso is attractive since it performs principled variable selection. However, when having correlated features, typically only one of them - quite arbitrarily - is kept in the model. Ridge simultaneously shrinks coefficients of these towards zero. If we apply penalties of both the absolute values and the squares of the coefficients, both virtues are retained. This method is called Elastic net. I used Cross Validation to arrive at the optimal α and λ value which were 0.5 and 0.01 respectively giving me RMSE of 0.525.
+
+```{r enet, include = FALSE, message = FALSE, warning=FALSE}
+enet_tune_grid <- expand.grid(
+  "alpha" = seq(0, 0.5, by = 0.1),
+  "lambda" = union(lasso_tune_grid[["lambda"]], ridge_tune_grid[["lambda"]])
+)
+set.seed(1234)
+enet_model <- train(
+  as.formula(regularization_formula),
+  data = data_train,
+  method = "glmnet",
+  preProcess = c("center", "scale"),
+  tuneGrid = enet_tune_grid,
+  trControl = fit_control
+)
+
+enet_model$bestTune # RMSE 0.525 Alpha = 0.5 Lambda 0.001
+```
+
+The graph below shows how our RMSE varies across different λ values:
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+ggplot(enet_model) + scale_x_log10() + theme_bw()
+```
+
+## e. One Standard Deviation Error Model
+
+**Which of the models you've trained is the "simplest one that is still good enough"?**
+
+Now, I focused on finding the simplest model that was still good enough. This means that the simple good enough model is within one standard error of the model with the lowest RMSE.
+In my case, using the one standard error rule didn't make any significant difference to the results. The RMSE was slightly higher for the penalized models. I would suggest using the Lasso model. It reduces the number of variables thereby decreasing complexity. Even with one standard error, its RMSE is 0.573 when compared with minimum λ value of 0.001 which gives 0.569 RMSE.
+
+```{r ols oneSE, include = FALSE, eval = FALSE, message = FALSE, warning=FALSE}
+
+train_control <- trainControl(
+  method = "cv",
+  number = 10,
+  selectionFunction = "oneSE")
+
+# Prepare model 1
+#---------------------
+set.seed(1234)
+ols_model_onese <- caret::train(as.formula(ols_formula3),
+                            data = data_train,
+                            method = "lm",
+                            preProcess = c("center", "scale"),
+                            trControl = train_control,
+                            na.action=na.omit
+                          )
+
+
+ols_model_onese # RMSE 0.525
+```
+
+```{r lasso oneSE, include = FALSE, eval = FALSE}
+
+# Set lasso tuning parameters
+train_control <- trainControl(
+  method = "cv",
+  number = 10,
+  selectionFunction = "oneSE")
+
+tenpowers <- 10^seq(-1, -3, by = -1)
+lasso_tune_grid <- expand.grid(
+  "alpha" = c(1),
+  "lambda" = c(tenpowers, tenpowers / 2) 
+)
+
+set.seed(1234)
+lasso_model_onse<- caret::train(as.formula(regularization_formula),
+                            data = data_train,
+                            method = "glmnet",
+                            preProcess = c("center", "scale"),
+                            trControl = train_control,
+                            tuneGrid = lasso_tune_grid,
+                            na.action=na.exclude)
+
+# lambda = 0.001 RMSE = 0.525
+
+```
+
+```{r ridge oneSE, include = FALSE, eval = FALSE}
+fit_control <- trainControl(method = "cv", number = 10, selectionFunction = "oneSE")
+
+# ridge model
+ridge_tune_grid <- expand.grid(
+  "alpha" = c(0),
+  "lambda" = seq(0.001, 0.5, by = 0.025)
+)
+set.seed(1234)
+ridge_model_onese <- train(
+  as.formula(regularization_formula),
+  data = data_train,
+  method = "glmnet",
+  preProcess = c("center", "scale"),
+  tuneGrid = ridge_tune_grid,
+  trControl = fit_control
+)
+
+ridge_model_onese # lambda 0.151 RMSE 0.538
+```
+
+```{r en oneSE, include = FALSE, eval = FALSE}
+enet_tune_grid <- expand.grid(
+  "alpha" = seq(0, 1, by = 0.05),
+  "lambda" = union(lasso_tune_grid[["lambda"]], ridge_tune_grid[["lambda"]])
+)
+set.seed(1234)
+enet_model_onese <- train(
+  as.formula(regularization_formula),
+  data = data_train,
+  method = "glmnet",
+  preProcess = c("center", "scale"),
+  tuneGrid = enet_tune_grid,
+  trControl = fit_control
+)
+
+enet_model_onese
+```
+
+## f. Principal Component Analysis via pcr
+
+I tried to improve the linear model by using PCA for dimensionality reduction. I centered and scaled the variables and used 'pcr' to conduct a search for the optimal number of principal components. The optimal number of principal components came out to be 124.
+
+```{r ols pca, include = FALSE, warning = FALSE, echo = FALSE}
+set.seed(1234)
+tune_grid <- data.frame(ncomp = 60:125)
+ols_model_pca <- train(
+  as.formula(ols_formula3),
+  data = data,
+  method = "pcr",
+  trControl = trainControl(method = "cv", number = 10),
+  tuneGrid = tune_grid,
+  preProcess = c("center", "scale")
+)
+ols_model_pca
+#pcr_fit$preProcess
+```
+
+## g. Principal Component Analysis on Penalized Models
+
+I used PCA prior to estimating penalized models via preProcess by applying the optimal number of principal components found before which was 124. I also removed features with zero variance. The model fit has slightly decreased in all penalized models as well having lost model interpretability. Among penalized models with pca preprocessing, Elastic Net performed the best with RMSE 0.546.
+
+```{r lasso pca, include = FALSE, warning = FALSE, message = FALSE}
+# Set lasso tuning parameters
+train_control <- trainControl(
+  method = "cv",
+  number = 10,
+  preProcOptions = list(pcaComp = 124))
+
+tenpowers <- 10^seq(-1, -3, by = -1)
+lasso_tune_grid <- expand.grid( 
+  "alpha" = c(1),
+  "lambda" = c(tenpowers, tenpowers / 2) 
+)
+lasso_model_pca <- caret::train(as.formula(regularization_formula),
+                            data = data_train,
+                            method = "glmnet",
+                            preProcess = c("center", "scale","nzv", "pca"),
+                            trControl = train_control,
+                            tuneGrid = lasso_tune_grid,
+                            na.action=na.exclude)
+
+lasso_model_pca # lambda = 0.001 RMSE = 0.547
+```
+
+```{r ridge pca, include = FALSE, warning = FALSE, message = FALSE}
+fit_control <- trainControl(method = "cv", number = 10, preProcOptions = list(pcaComp = 124))
+
+# ridge model
+ridge_tune_grid <- expand.grid(
+  "alpha" = c(0),
+  "lambda" = seq(0.05, 1, by = 0.025)
+)
+set.seed(857)
+ridge_model_pca <- train(
+  as.formula(regularization_formula),
+  data = data_train,
+  method = "glmnet",
+  preProcess = c("center", "scale","nzv", "pca"),
+  tuneGrid = ridge_tune_grid,
+  trControl = fit_control
+)
+
+ridge_model_pca #RMSE 0.556
+
+```
+
+```{r enet pca, include = FALSE, message = FALSE, warning=FALSE}
+enet_tune_grid <- expand.grid(
+  "alpha" = seq(0, 0.5, by = 0.1),
+  "lambda" = union(lasso_tune_grid[["lambda"]], ridge_tune_grid[["lambda"]])
+)
+set.seed(1234)
+enet_model_pca <- train(
+  as.formula(regularization_formula),
+  data = data_train,
+  method = "glmnet",
+  preProcess = c("center", "scale", "nzv", "pca"),
+  tuneGrid = enet_tune_grid,
+  trControl = fit_control
+)
+
+# RMSE 0.546
+
+```
+
+The results of the predictive performance of all the models that we have tried out are listed into one table below for comparison:
+
+```{r, echo = FALSE, message = FALSE, warning= FALSE}
+
+final_models <-
+  list("OLS Model 1" = ols_model1,
+       "OLS Model 2" = ols_model2,
+       "OLS Model 3" = ols_model3,
+       "OLS Model(PCA)" = ols_model_pca, 
+       "LASSO" = lasso_model,
+       "LASSO(PCA)" = lasso_model_pca,
+       "Ridge" = ridge_model,
+       "Ridge(PCA)" = ridge_model_pca,
+       "Elastic Net" = enet_model,
+       "Elastic Net(PCA)" = enet_model_pca)
+
+
+results <- resamples(final_models) %>% summary()
+
+final_results <- imap(final_models, ~{
+  round(mean(results$values[[paste0(.y,"~RMSE")]]),3)
+}) %>% unlist() %>% as.data.frame() %>%
+  rename("CV RMSE" = ".")
+
+final_results %>% kbl(caption = "<center><strong>List of Models CV RSME</strong></center>", escape = FALSE) %>%
+  kable_classic(full_width = F, html_font = "Cambria") %>%
+  kable_styling( position = "center")
+```
+
+## h. Predicting on test set
+
+The table shows that the best predictors of the data were OLS Model 3, Lasso, and the Elastic Net model with RMSE 0.525. We will use the Lasso model as our bets model due to less number of variables which means a less complex model as well as easier interpretability. With our Lasso model, I tested on the holdout set and got RMSE of 0.558. This means we can expect to make an error of $0.558 (log value) when using our model on the live data in the New York property valuation market on the assumption that the external validity is high.
+
+```{r, include = FALSE, warning= FALSE, message = FALSE}
+data_holdout <- data_holdout %>% select(-c(ID, TotalValue))
+lasso_model_predict <- predict(lasso_model, newdata = data_holdout)
+RMSE(lasso_model_predict,data_holdout$logTotalValue)
+```
+
+# 2. Clustering on the USArrests dataset
+
+Before applying clustering methods, I will bring all variables to the same scale as clusters may be sensitive to details such as different scales of distance for different variables. I then used the nbClust indices to choose number of clusters. 'nbClust' calculates 30 indices based on various principles and chooses cluster by majority rule. In my analysis, 'nbClust' stated that 11 of the indices proposed 2 as the best number of clusters.
+
+```{r, include = FALSE, warning = FALSE, message = FALSE}
+df <- as.data.frame(scale(USArrests))
+```
+
+```{r, include =FALSE, message=FALSE, warning=FALSE}
+nb <- NbClust(df, method = "kmeans", min.nc = 2, max.nc = 10, index = "all")
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+fviz_nbclust(nb) + theme_bw()
+#11 proposed 2 as the best number of clusters 
+```
+
+
+Then i plotted the clusters on to a graph. The clustering is done via the k-means method, which aims to partition the points into k groups such that the sum of squares from points to the assigned cluster centers is minimized. I used 25 'nstarts' in the configuration of the algorithms. 'nstart' is the number of times the algorithm initializes with new random centers and hence it is highly recommended to pick higher value for it to stabilize the algorithm. I plotted observations colored by clusters in the space of urban population and Murder variable. The clusters are shown below:
+
+```{r, include = FALSE, warning = FALSE, message = FALSE}
+km <- kmeans(df, centers = 2, nstart = 25)
+
+```
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+data_w_clusters <- mutate(df, cluster = factor(km$cluster))
+ggplot(data_w_clusters, aes(x = UrbanPop, y = Murder, color = cluster, label = row.names(df))) +
+  geom_point() + theme_bw() + geom_text_repel(aes(label=row.names(df)), size = 2.2)
+```
+
+It is a good idea to plot the cluster results. These can be used to assess the choice of the number of clusters as well as comparing two different clusters
+
+Sometimes we want to visualize the whole data in a colored scatter plot. The problem is that the data contains more than 2 variables and the question is what variables to choose for the xy scatter plot.
+
+A solution is to reduce the number of dimensions by applying a dimensionality reduction algorithm known as Principal Component Analysis (PCA), that operates on the four variables and outputs two new variables (that represent the original variables) that I can use to do the plot.
+
+So i carried out PCA on the data and got the first two principal components for all observations. I plotted two clusters as defined by the first two principal components.
+
+```{r, include = FALSE, warning = FALSE, message = FALSE}
+pca_result <- prcomp(df)
+first_two_pc <- as_tibble(pca_result$x[, 1:2])
+```
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+data_w_clusters_pca <- mutate(first_two_pc, cluster = factor(km$cluster))
+
+ggplot(data_w_clusters_pca, aes(x = PC1, y = PC2, color = cluster, label = row.names(df))) +
+  geom_point() + theme_bw() + geom_text_repel(aes(label=row.names(df)), size = 2.2)
+```
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+fviz_pca(pca_result)
+```
+
+# 3. PCA of high-dimensional data
+
+For this task, I performed PCA on 40 observations of 1000 variables. Data consists of measurements of genes of tissues of healthy and diseased patients.
+
+```{r, include = FALSE, warning = FALSE, message = FALSE}
+
+genes <- read_csv("https://www.statlearning.com/s/Ch10Ex11.csv", col_names = FALSE) %>% t() %>% as_tibble()  # the original dataset is of dimension 1000x40 so we transpose it
+
+```
+
+```{r, include = FALSE, warning = FALSE, message = FALSE}
+pca_result <- prcomp(genes, scale. = TRUE)
+```
+
+I performed PCA on this data with scaling features and then visualized data points in the space of the first two principal components. I observed two distinct clusters one on each end of the graph with healthy patients on the right and diseased on the left.
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+fviz_pca_ind(pca_result,  repel = TRUE)
+```
+
+We can see that PC1 matters a lot hence we look at features that have high loadings for the first principal component to determine which individual features matter most in separating the diseased from the healthy. The top 10 most important features are visualized below:
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+fviz_contrib(pca_result, choice = "var", axes = 1, top = 10)
+```
+
+The top 3 most important features based on the largest coordinates (in absolute terms) are V502, V589, and V565. With the top two features, I plotted the observations in the coordinate system defined by these two original features:
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+genes$healthy <- as.factor(c(rep(1, 20), rep(0, 20)))
+ggplot(genes, aes(x = V502, y = V589, color = healthy)) + geom_point() + theme_bw() + scale_color_manual(name="Legend",
+                       labels=c("Diseased", "Healthy"),
+                       values=c("red","cyan3"))
+```
+
+We can see a distinct separation on the graph however the separation on the PC1-PC2 chart was much more separated.
+
+# Appendix
+
+**Figure 1**
+```{r, echo = FALSE, warning = FALSE, message = FALSE, fig.height= 9, fig.width=8}
+ggpairs_chart
+```
+
+**Figure 2**
+```{r, echo = FALSE, warning = FALSE, message = FALSE, fig.height= 9, fig.width=8}
+corr_chart
+```
+
+
+# Acknowledgments
+
+Some of the code was borrowed from the Data Science 1: Machine Learning Concepts labs. I would like to extend my gratitude to Zoltan Papp, Jano Pal, and Divenyi Janos for allowing us to use the code.

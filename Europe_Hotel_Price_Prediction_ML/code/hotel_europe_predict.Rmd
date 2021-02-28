@@ -1,0 +1,586 @@
+---
+title: 'Data Analysis 3: Assignment 3'
+author: "Fasih Atif"
+date: "2/14/2021"
+output:
+  html_document:
+    rmdformats::robobook
+---
+
+```{r load libraries, include = FALSE, warning = FALSE, message = FALSE}
+library(ggpubr)
+library(Metrics)
+library(scales)
+library(ranger)
+library(kableExtra)
+library(ranger)
+library(caret)
+library(tidyverse)
+
+```
+
+```{r import data, include = FALSE, warning = FALSE, message = FALSE}
+data <- read.csv('https://raw.githubusercontent.com/fasihatif/Data-Analysis-1-2-3/master/Data_Analysis_3/Assignment_3_DA3/data/raw/hotelbookingdata.csv')
+
+backup1 <- data
+```
+
+```{r, include = FALSE, warning = FALSE, message = FALSE}
+data <- backup1
+
+```
+
+```{r data_cleaning, include = FALSE, warning = FALSE, message = FALSE}
+
+#1.0 |                            Data Cleaning
+#------------------------------------------------------------------------------#
+
+
+#1.1 | distance to center entered as string in miles with one decimal
+#----------------------------------------------------------------------
+# distance to center entered as string in miles with one decimal
+data$distance <- as.numeric(gsub("[^0-9\\.]","",data$center1distance))
+data$distance_alter <- as.numeric(gsub("[^0-9\\.]","",data$center2distance))
+
+
+#1.2| parsing accommodationtype column | replace missing values to handle split
+#-------------------------------------------------------------------------------
+data[data$accommodationtype == "_ACCOM_TYPE@",]$accommodationtype <- "_ACCOM_TYPE@NA"
+data$accommodation_type <- unlist(sapply(strsplit(as.character(data$accommodationtype), "@"), '[[', 2))
+data$accommodationtype <- NULL
+
+
+#1.3| Remove '/5' from the end of ratings
+#-----------------------------------------
+data$rating <- as.numeric(gsub("/5","",data$guestreviewsrating))
+
+
+#1.4| Adjust prices to be per day (rounded to nearest dollar)
+#-------------------------------------------------------------
+data <- data %>% mutate(price_per_night = round(ifelse(price_night == "price for 4 nights", price/4, price)))
+
+
+#1.5| Rename columns
+#--------------------
+colnames(data)[colnames(data)=="addresscountryname"] <- "f_country"
+colnames(data)[colnames(data)=="city_actual"] <- "f_city"
+colnames(data)[colnames(data)=="starrating"] <- "stars"
+colnames(data)[colnames(data)=="rating2_ta"] <- "avg_rating_ta"
+colnames(data)[colnames(data)=="rating2_ta_reviewcount"] <- "rating_count_ta"
+colnames(data)[colnames(data)=="rating"] <- "avg_guest_rating"
+colnames(data)[colnames(data)=="rating_reviewcount"] <- "rating_count"
+
+
+#1.6| Drop variables that arent required anymore
+#------------------------------------------------
+data$price <- NULL
+data$price_night <- NULL
+data$center1label <- NULL
+data$center2label <- NULL
+data$center1distance <- NULL
+data$center2distance <- NULL
+data$s_city <- NULL
+data$offer <- NULL
+data$offer_cat <- NULL
+data$neighbourhood <- NULL
+data$guestreviewsrating <- NULL
+
+
+#1.7| Drop if hotel id is missing
+#---------------------------------
+# drop if hotel id is missing
+data <- data[!is.na(data$hotel_id), ]
+
+
+#1.8| Fix star ratings
+#----------------------
+#Hotels dont have 0 star ratings
+table(data$stars)
+data$stars[data$stars == 0] <- NA
+
+# Create a flag variable for missing star observations and fill missing stars with median star value
+data <- data %>%
+  mutate(
+    flag_stars=ifelse(is.na(stars),1, 0))
+   # stars =  ifelse(is.na(stars), median(stars, na.rm = T), stars))
+
+
+#1.9| Drop perfect duplicates
+#-----------------------------
+data[duplicated(data)==T,]
+#these are perfect duplicates of the observation in the previous row
+data <- data[!duplicated(data), ]
+
+
+#1.10| Convert columns to factor
+#--------------------------------
+# Convert columns to factor
+data <- data %>%
+  mutate(f_city = factor(f_city),
+         f_country = factor(f_country))
+
+
+#1.11| Take log of ratings
+#--------------------------
+
+# Check distribution
+data %>%
+  select(avg_guest_rating,rating_count,avg_rating_ta,rating_count_ta) %>%
+  keep(is.numeric) %>% 
+  gather() %>% 
+  ggplot(aes(value)) +
+  facet_wrap(~key, scales = "free") +
+  geom_histogram()
+
+# Take log of ratings
+data <- data %>%
+  mutate(
+    ln_rating_count = log(rating_count + 0.01),
+    ln_rating_count_ta = log(rating_count_ta + 0.01))
+
+
+#1.12| Take log of price_per_night
+#----------------------------------
+# Check distribution
+ggplot(data, aes(x = price_per_night)) + geom_histogram()
+
+# Remove extreme values
+data <- data %>% filter(price_per_night <= 500)
+
+# Take log of price_per_night
+data <- data %>%
+  mutate(
+    ln_price_per_night = log(price_per_night))
+
+
+#1.13| Take log of distance variables
+#--------------------------------------
+
+# Check distribution
+data %>%
+  select(distance, distance_alter) %>%
+  keep(is.numeric) %>% 
+  gather() %>% 
+  ggplot(aes(value)) +
+  facet_wrap(~key, scales = "free") +
+  geom_histogram()
+
+# Take log of ratings
+data <- data %>%
+  mutate(
+    ln_distance = log(distance + 1),
+    ln_distance_alter = log(distance_alter + 1))
+
+
+#1.14| Remove rows with missing values
+#--------------------------------------
+data <- data[complete.cases(data), ]
+
+
+```
+
+## Introduction
+
+The task of this assignment is to predict the hotel prices on a specific day in the following cities:
+
++--------------------------+----------------------------+
+| Berlin                   | Budapest                   |
++--------------------------+----------------------------+
+| Munich                   | Prague                     |
++--------------------------+----------------------------+
+| Vienna                   | Warsaw                     |
++--------------------------+----------------------------+
+
+The original 'hotel-europe' data consisted of 149966 observations and 24 variables. I filtered the data for February 2018 weekend prices, the cities that I mentioned above, and for specifically Hotels. I did some significant data cleaning such as changing column names to something more meaningful for example 'addresscountryname' was updated to 'f_country' where the f signifies that this variable is a factor. I removed currency symbols, converted text to numeric columns (such as distance to city center), and removed '/5' from ratings columns. Some of the prices mentioned were for different number of night stays so I converted all necessary observations to represent per night price. There were around 15 rows with missing data so I completely removed them. When I filtered the data, the variables such as weekend had near zero variance so such columns were removed as well. Some of the variables related to ratings and distance had skewed distributions. So, I created new variables with the log of these variables to normal distribute these variables. Our cleaned data set consists of 1376 observations and 23 variables.
+
+
+```{r filter data, include = FALSE, warning = FALSE, message = FALSE}
+
+#2.0|                             Filter data
+#------------------------------------------------------------------------------#
+
+#2.1| Filter for cities 
+#-----------------------
+cities_filter <- c("Berlin", "Munich", "Vienna", "Budapest", "Prague", "Warsaw")
+data <- data %>% filter(f_city %in% cities_filter)
+
+data$f_city <- droplevels(data$f_city)
+data$f_country <- droplevels(data$f_country)
+
+#2.2| Filter for date 
+#----------------------
+data <- data %>% filter(year == 2018)
+data <- data %>% filter(month == 2)
+data <- data %>% filter(accommodation_type == "Hotel")
+
+
+#2.3| Filter for hotels
+#-----------------------
+data <- data %>% filter(accommodation_type == "Hotel")
+
+
+```
+
+```{r model construction, include = FALSE, warning = FALSE, message = FALSE}
+
+#3.0|                               Model Construction
+#------------------------------------------------------------------------------#
+
+#3.1| Assign variables to categories for easier use in constructing models
+#--------------------------------------------------------------------------
+n_var <- c("distance", "distance_alter")
+d_var <- c("scarce_room")
+f_var <- c("f_country", "f_city")
+ratings_var <- c("stars", "avg_guest_rating", "rating_count", "avg_rating_ta", "rating_count_ta")
+log_var <- c("ln_rating_count", "ln_rating_count_ta", "ln_distance", "ln_distance_alter")
+
+
+#3.2| Construct model equation for OLS
+#--------------------------------------
+ols_formula1 <- as.formula(paste("price_per_night ~ ",paste(c(n_var,d_var,f_var,ratings_var),collapse = " + ")))
+ols_formula2 <- as.formula(paste("price_per_night ~ ",paste(c(n_var,d_var,f_var,ratings_var,log_var),collapse = " + ")))
+
+
+#3.3| Construct model equation for LASSO
+#----------------------------------------
+lasso_formula <- as.formula(paste("price_per_night ~ ",paste(c(n_var,d_var,f_var,ratings_var,log_var),collapse = " + ")))
+
+
+#3.4| Construct model equation for CART
+#---------------------------------------
+cart_formula <- as.formula(paste("price_per_night ~ ",paste(c(n_var,d_var,f_var,ratings_var),collapse = " + ")))
+
+
+#3.5| Construct model equation for Random Forest
+#------------------------------------------------
+rf_formula <- as.formula(paste("price_per_night~ ",paste(c(n_var,d_var,f_var,ratings_var),collapse = " + ")))
+
+```
+
+## Model Construction
+
+I will be predicting hotel prices using 4 machine learning models:
+
+1.  OLS Linear Regression
+2.  LASSO
+3.  CART
+4.  Random Forest
+
+Some of the models will have two different formulas or equations which will differ in complexity. Meaning one of the models will have more variables in functional, logarithmic, or interaction form. The formulas for the various models are shown below:
+
+**OLS Model 1**
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+
+# OLS MODEL 1
+ols_formula1  
+
+```
+
+**OLS Model 2**
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+
+#OLS MODEL 2
+ols_formula2
+```
+
+**LASSO Model **
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+#LASSO
+lasso_formula
+
+```
+
+**CART Model**
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+#CART
+cart_formula
+```
+
+**Random Forest Model**
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+#Random Forest Model
+rf_formula
+
+```
+
+We split our data into a 75/25 ratio with the 25% being reserved for the holdout set (against which we predict our training models for validation). The remaining 75% will be used for training the models via 5 Fold Cross Validation. The holdout set consists of 343 observations while the training set consists of 1033 observations.
+
+```{r data split, include = FALSE, warning = FALSE, message = FALSE}
+
+#4.0|                                Data Split
+#------------------------------------------------------------------------------#
+
+set.seed(1234)
+train_indices <- as.integer(createDataPartition(data$price_per_night, p = 0.75, list = FALSE))
+data_train <- data[train_indices, ]
+data_holdout <- data[-train_indices, ]
+
+```
+
+## OLS Linear Regression
+
+I trained my 2 OLS models which differ in complexity and received the following results:
+
+```{r ols, include = FALSE, warning = FALSE, message = FALSE}
+#5.0|                          OLS Linear Rregression
+#------------------------------------------------------------------------------#
+
+#5.1| Set OLS tuning parameters
+#--------------------------------
+train_control <- trainControl(
+  method = "cv",
+  number = 5)
+
+#5.2| Prepare model 1
+#---------------------
+set.seed(1234)
+ols_model1 <- caret::train(ols_formula1,
+                            data = data_train,
+                            method = "lm",
+                            preProcess = c("center", "scale"),
+                            trControl = train_control,
+                            na.action=na.omit)
+#RMSE 45.72795
+
+
+#5.3| Prepare model 2
+#----------------------
+set.seed(1234)
+ols_model2 <- caret::train(ols_formula2,
+                          data = data_train,
+                          method = "lm",
+                          preProcess = c("center", "scale"),
+                          trControl = train_control,
+                          na.action=na.omit)
+
+#RMSE 44.87983
+
+#5.4| Predict on holdout set
+#----------------------------
+data_holdout_ols_prediction <- data_holdout %>%
+  mutate(predicted_price = predict(ols_model2, newdata = data_holdout, na.action = na.omit))
+
+rmse(data_holdout_ols_prediction$predicted_price, data_holdout$price_per_night) #46.15864
+```
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+
+# RMSE fold results for all models
+ols_model1_rmse <- as.matrix(round(ols_model1$resample$RMSE,3))
+ols_model2_rmse <- as.matrix(round(ols_model2$resample$RMSE,3))
+ols_mean_rmse <- c(mean(ols_model1_rmse), mean(ols_model2_rmse))
+
+ols_model_rmse_table <- as.data.frame(cbind(ols_model1_rmse,ols_model2_rmse))
+colnames(ols_model_rmse_table) <- c("OLS Model 1", "OLS Model 2")
+ols_rmse_table <- rbind(ols_model_rmse_table,ols_mean_rmse)
+rownames(ols_rmse_table) <- c("Fold 1", "Fold 2", "Fold 3", "Fold 4", "Fold 5", "Average")
+
+ols_rmse_table %>% kbl(caption = "<center><strong>Cross Validation RMSE in OLS Models</strong></center>", escape = FALSE) %>%
+  kable_classic(full_width = F, html_font = "Cambria") %>%
+  kable_styling( position = "center")
+
+```
+
+The table shows that OLS Model 2 which was more complex gave a better predictive performance. The Root Mean Squared Error (RMSE) of Model 2 was 44.87 in comparision to Model 1's 45.72. I then used this trained model and ran it on the holdout set and got a RMSE of 46.15. The train and validation set RMSE's arent very far from each other so the results looks good. But lets see how other models perform in comparision.
+
+## LASSO
+Lasso is a model that penalizes models for complexity. We assign it a big set of predictors and the model returns with an estimated regression that has fewer coefficients. The missing coefficients are actually penalized and assigned a value of zero. For the variables that remain, it gives estimated coefficients. We tested several lambdas or penalization values and the lowest RMSE of 44.87 was received with lambda 0.05. Using this lambda, we predicted on the holdout set and received a RMSE of 46.09. Again, the training and holdout set RMSE are close to each other. The coefficients of the lasso model can be seen below where we can observe some of the penalized coefficients:
+
+
+```{r lasso,  include = FALSE, warning = FALSE, message = FALSE}
+
+#6.0|                                   LASSO
+#------------------------------------------------------------------------------#
+
+#6.1| Set lasso tuning parameters
+#---------------------------------
+train_control <- trainControl(
+  method = "cv",
+  number = 5)
+
+#6.2| Set tune_grid parameteres
+#-------------------------------
+tune_grid <- expand.grid("alpha" = c(1), "lambda" = seq(0.05, 1, by = 0.05))
+
+set.seed(1234)
+lasso_model <- caret::train(lasso_formula,
+                            data = data_train,
+                            method = "glmnet",
+                            preProcess = c("center", "scale"),
+                            trControl = train_control,
+                            tuneGrid = tune_grid,
+                            na.action=na.omit)
+
+# lambda 0.05 | RMSE 44.87893
+
+lasso_coeffs <- coef(lasso_model$finalModel, lasso_model$bestTune$lambda) %>%
+  as.matrix() %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "variable") %>%
+  rename(coefficient = `1`)  # the column has a name "1", to be renamed
+
+
+data_holdout_lasso_prediction <- data_holdout %>%
+  mutate(predicted_price = predict(lasso_model, newdata = data_holdout, na.action = na.omit))
+
+rmse(data_holdout_lasso_prediction$predicted_price, data_holdout$price_per_night) #46.09648
+
+```
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+lasso_coeffs %>% kbl(caption = "<center><strong>Lasso Model Coefficients</strong></center>", escape = FALSE) %>%
+  kable_classic(full_width = F, html_font = "Cambria") %>%
+  kable_styling( position = "center")
+```
+
+## CART
+I grew a regression tree using the Classification And Regresstion Tree (CART). I didnt define any functional form or take any logs in this model since these models are good at approximating the non linear forms. I took various values of the complexity parameter (cp) as a stopping rule for the tree. I took values of 0.001, 0.01, 0.005, and 0.05 out which cp of 0.01 gave us the lowest RMSE of 46.22. I used this CART model on the holdout set and got RMSE of 49.75.
+
+
+```{r cart, include = FALSE, warning = FALSE, message = FALSE}
+
+#7.0|                                  CART
+#------------------------------------------------------------------------------#
+# Do 5-fold CV
+train_control <- trainControl(method = "cv",
+                              number = 5,
+                              verboseIter = FALSE)
+
+
+#7.1| Train Random Forest Model
+#-------------------------------
+
+set.seed(1234)
+cart_model <- train(
+  cart_formula, data=data_train, method = "rpart",
+  trControl = train_control,
+  tuneGrid= expand.grid(cp = c(0.001,0.005,0.01,0.05)),
+  na.action = na.pass)
+
+#7.2| Predict on Holdout set
+#-----------------------------
+data_holdout_cart_prediction <- predict(cart_model , newdata=data_holdout)
+rmse(data_holdout_cart_prediction, data_holdout$price_per_night) #rmse 49.75809
+```
+
+## Random Forest
+Just like CART, I took the basic form of the variables for the random forest model. I tried to tune the model as well for better predictive performance. The first tuning parameter is the number of bootstrap samples to be drawn. WI took the default value of 500. Second parameter is the number of variables (mtry) to be considered at each node in each tree. General rule of thumb is to take square root of the number of variables hence I took teh range of 3-5. Third parameter is the minimum number of observations (min.nodes) in terminal nodes which I took as 5,7, and 10. I received the following results:
+
+
+```{r, include = FALSE, warning = FALSE, message = FALSE}
+
+#8.0|                               Random Forest
+#------------------------------------------------------------------------------#
+
+#8.1| Set train control parameter
+#---------------------------------
+
+# Do 5-fold CV
+train_control <- trainControl(method = "cv",
+                              number = 5,
+                              verboseIter = FALSE)
+
+
+#8.2| Set tuning parameters
+#---------------------------------
+tune_grid <- expand.grid(
+  .mtry = c(3,4,5),
+  .splitrule = "variance",
+  .min.node.size = c(5,7,10))
+
+
+#8.3| Train Random Forest Model
+#-------------------------------
+
+set.seed(1234)
+
+rf_model <- train(
+  rf_formula,
+  data = data_train,
+  method = "ranger",
+  trControl = train_control,
+  tuneGrid = tune_grid,
+  importance = "impurity")
+    
+# mtry = 5, splitrule = variance and min.node.size = 5
+
+```
+
+```{r, echo = FALSE, warning = FALSE, message= FALSE}
+# Show Model B rmse shown with all the combinations
+rf_tuning_model <- rf_model$results %>%
+  dplyr::select(mtry, min.node.size, RMSE) %>%
+  dplyr::rename(nodes = min.node.size) %>%
+  spread(key = mtry, value = RMSE)
+
+
+rf_tuning_model%>% kbl(caption = "<center><strong>Random Forest RMSE by tuning parameters</strong></center>", escape = FALSE) %>%
+  kable_classic(full_width = F, html_font = "Cambria") %>%
+  kable_styling( position = "center")
+```
+
+The optimal tuning parameters consisted of mtree as 5 and min.node.size as 5 which provided me with RMSE of 41.15. On the holdout set,I got RMSE of 41.30. the variable importance graph can seen below:
+
+
+```{r predit random forest, include = FALSE, warning = FALSE, message = FALSE}
+
+#8.4| Predict model on holdout set
+#----------------------------------
+data_holdout_rf_prediction <- data_holdout %>%
+  mutate(predicted_price = predict(rf_model, newdata = data_holdout))
+
+rmse(data_holdout_rf_prediction$predicted_price, data_holdout$price_per_night) #41.30
+
+```
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+# first need a function to calculate grouped varimp
+group.importance <- function(rf.obj, groups) {
+  var.imp <- as.matrix(sapply(groups, function(g) {
+    sum(importance(rf.obj)[g], na.rm = TRUE)
+  }))
+  colnames(var.imp) <- "MeanDecreaseGini"
+  return(var.imp)
+}
+
+
+##############################
+# full varimp plot, top 10 only
+##############################
+rf_model_2_var_imp <- importance(rf_model$finalModel)/1000
+rf_model_2_var_imp_df <-
+  data.frame(varname = names(rf_model_2_var_imp),imp = rf_model_2_var_imp) %>%
+  arrange(desc(imp)) %>%
+  mutate(imp_percentage = imp/sum(imp))
+
+
+# have a version with top 10 vars only
+rf_model_2_var_imp_plot_b <- ggplot(rf_model_2_var_imp_df[1:10,], aes(x=reorder(varname, imp), y=imp_percentage)) +
+  geom_point(color= "cyan3", size=2) +
+  geom_segment(aes(x=varname,xend=varname,y=0,yend=imp_percentage), color= "cyan3", size=1) +
+  ylab("Importance (Percent)") +
+  xlab("Variable Name") +
+  coord_flip() +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  theme_bw() +
+  theme(axis.text.x = element_text(size=8), axis.text.y = element_text(size=8),
+        axis.title.x = element_text(size=7), axis.title.y = element_text(size=7)) +
+   labs(title = "Top 10 Imp Variables")
+
+rf_model_2_var_imp_plot_b
+```
+
+
+## Conclusion
+
+ We started off with OLS models of various complexities to see how the RMSE measures across the models. OLS model 2 performed better than OLS model 1 and gave RMSE of 44.15.  I tried lasso model where it penalized some coefficients and gave us a test RMSE OF 46.09. CART performed the worst giving me RMSE of 49. Random Forest performed the best giving me RMSE of 41.30. It means we can expect to make an error of $41.3 when using our model on the live data on the assumption that the external validity is high. All in all, Random Forest performed the best in terms of the lowest RMSE closely followed by Lasso Model.
+ 
+ 
+ # References
+
+1.  BEKES, G., 2021. DATA ANALYSIS FOR BUSINESS, ECONOMICS, AND POLICY. [S.l.]: CAMBRIDGE UNIV PRESS.
+ 
+ 

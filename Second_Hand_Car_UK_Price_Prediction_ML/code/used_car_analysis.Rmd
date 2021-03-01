@@ -1,0 +1,234 @@
+---
+title: "<center>CH13-3 DATA EXERCISE<center>"
+author: "<center>Fasih Atif<center>"
+date: "<center>1/20/2021<center>"
+output:
+ html_document:
+   code_download: true
+---
+
+In this task, I was asked to collect data on used cars for different city, time, or a different make from the one used in the book. I used a kaggle dataset on used cars for a city in United Kingdom. The car that I will focus on is Ford Fiesta. We further restricted the Ford Fiestas for manual transmission, petrol fuel type, engine size of 1.0,1.1,and 1.2. We also took some functional forms of variables such car age and mileage.
+
+The distribution of the prices of the used cars in our data sets can be seen below:
+
+```{r, include = FALSE, message = FALSE, warning = FALSE}
+library(tidyverse)
+library(caret)
+library(kableExtra)
+```
+
+
+```{r import data, include = FALSE, message = FALSE, warning = FALSE}
+data <- read_csv("https://raw.githubusercontent.com/fasihatif/Data-Analysis-1-2-3/master/Data_Analysis_3/atif-fasih_da3_data-exercise/CH13_Q3/data/ford.csv")
+
+```
+
+```{r data_cleaning, include = FALSE, message = FALSE, warning = FALSE}
+# Filter for cars not older than 2015
+data <-  data %>%
+  filter(year > 2014)
+
+# MISSING VALUES IN DF
+# Check for Missing Values in DF
+na_count <- sapply(data, function(y) sum(length(which(is.na(y)))))
+na_count <- data.frame(na_count)
+
+# Types of engine size
+data %>%
+  group_by(model) %>%
+  dplyr::summarize(frequency=n()) %>%
+  mutate(percent = frequency / sum(frequency)*100,
+         cumulative_percent = cumsum(frequency)/sum(frequency)*100)
+
+# Focus only on Ford Fiesta
+data <-  data %>%
+  filter(model ==  "Fiesta")
+
+
+# Types of fuelType cars
+data %>%
+  group_by(fuelType) %>%
+  dplyr::summarize(frequency=n()) %>%
+  mutate(percent = frequency / sum(frequency)*100,
+         cumulative_percent = cumsum(frequency)/sum(frequency)*100)
+
+# Focus only on petrol cars
+data <-  data %>%
+  filter(fuelType ==  "Petrol")
+
+
+# Types of transmission
+data %>%
+  group_by(transmission) %>%
+  dplyr::summarize(frequency=n()) %>%
+  mutate(percent = frequency / sum(frequency)*100,
+         cumulative_percent = cumsum(frequency)/sum(frequency)*100)
+
+# Focus only on Manual transmission cars
+data <-  data %>%
+  filter(transmission ==  "Manual")
+
+
+# Types of engine size
+data %>%
+  group_by(engineSize) %>%
+  dplyr::summarize(frequency=n()) %>%
+  mutate(percent = frequency / sum(frequency)*100,
+         cumulative_percent = cumsum(frequency)/sum(frequency)*100)
+
+# Focus only on engine size of 1,1.1, and 1.2
+data <-  data %>%
+  filter(engineSize ==  c(1,1.1,1.2))
+
+# Dummy variables for engineSize and covert to integer
+data <- data %>%
+  mutate(eng_1.0 = ifelse(engineSize == 1,1,0),
+         eng_1.1 = ifelse(engineSize == 1.1,1,0),
+         eng_1.2 = ifelse(engineSize == 1.2,1,0))
+  
+data <- data %>%
+  mutate(eng_1.0 = as.integer(eng_1.0),
+         eng_1.1 = as.integer(eng_1.1),
+         eng_1.2 = as.integer(eng_1.2))
+
+
+# Convert years into Age
+data$age <- 2021-data$year
+
+
+# age: quadratic, cubic
+data <- data %>%
+  mutate(agesq = age^2,
+         agecu = age^3)
+
+# mileage: quadratic
+data <- data %>%
+  mutate(mileagesq = mileage^2)
+```
+
+```{r ggplot, echo = FALSE, warning = FALSE, echo = FALSE}
+ggplot(data=data, aes(x=price)) +
+  geom_histogram(aes(y = (..count..)/sum(..count..)), binwidth = 1000, boundary=0,
+                 color = "white", fill = "blue", size = 0.25, alpha = 0.8,  show.legend=F, na.rm=TRUE) +
+  coord_cartesian(xlim = c(2700, 20000)) +
+  labs(x = "Price (Pounds)",y = "Percent")+
+  theme_bw() +
+  expand_limits(x = 0.01, y = 0.01) +
+  scale_y_continuous(expand = c(0.01,0.01),labels = scales::percent_format(accuracy = 1)) +
+  scale_x_continuous(expand = c(0.01,0.01),breaks = seq(0,20000, 2500))
+
+```
+
+
+To predict price of used car that I might want to sell, I made 4 different models with varying complexities:
+
+```{r models, warning = FALSE, message = FALSE}
+model1 <- as.formula(price ~ age + agesq)
+model2 <- as.formula(price ~ age + agesq + mileage + mileagesq)
+model3 <- as.formula(price ~ age + agesq + mileage + mileagesq + tax + mpg + eng_1.0 + eng_1.1 + eng_1.2)
+model4 <- as.formula(price ~ age + agesq + agecu + mileage + mileagesq + tax + eng_1.0*age + eng_1.1*age + eng_1.2*age + mpg*age + mileage*age + tax*age)
+
+```
+
+I also used cross validation with 4 folds. This meant splitting the data into four in a random fashion to define our four test sets. We trained the 4 models and got the following Root Mean Square Errors (RMSE). The table shows the performance our models on each fold. The best models were model 4 closely followed by model 3. these two have the best prediction properties.
+```{r cross validation, echo = FALSE, warning = FALSE, message = FALSE}
+# Cross-validation
+
+# set number of folds
+k <- 4
+
+set.seed(12345)
+cv1 <- train(model1, data, method = "lm", trControl = trainControl(method = "cv", number = k))
+set.seed(12345)
+cv2 <- train(model2, data, method = "lm", trControl = trainControl(method = "cv", number = k))
+set.seed(12345)
+cv3 <- train(model3, data, method = "lm", trControl = trainControl(method = "cv", number = k), na.action = "na.omit")
+set.seed(12345)
+cv4 <- train(model4, data, method = "lm", trControl = trainControl(method = "cv", number = k), na.action = "na.omit")
+
+
+# calculate average rmse
+cv <- c("cv1", "cv2", "cv3", "cv4")
+rmse_cv <- c()
+
+for(i in 1:length(cv)){
+  rmse_cv[i] <- sqrt((get(cv[i])$resample[[1]][1]^2 +
+                        get(cv[i])$resample[[1]][2]^2 +
+                        get(cv[i])$resample[[1]][3]^2 +
+                        get(cv[i])$resample[[1]][4]^2)/4)
+}
+
+
+# summarize results
+cv_mat <- data.frame(rbind(cv1$resample[4], "Average"),
+                     rbind(cv1$resample[1], rmse_cv[1]),
+                     rbind(cv2$resample[1], rmse_cv[2]),
+                     rbind(cv3$resample[1], rmse_cv[3]),
+                     rbind(cv4$resample[1], rmse_cv[4])
+)
+
+colnames(cv_mat)<-c("Resample","Model1", "Model2", "Model3", "Model4")
+cv_mat %>% kbl(caption = "<center><strong>Car price models estimated and evaluated using 4 fold cross validation and RMSE</strong></center>", escape = FALSE) %>%
+  kable_classic(full_width = F, html_font = "Cambria") %>%
+  kable_styling( position = "center")
+
+
+```
+
+For prediction purposes, I will focus on one used car that I want to put on sale in the market. It 5 years old, has a mileage of 15000, engine size is 1.1, mpg is 55.0, tax payments are 200 pounds, and the engine model is 1.1.
+
+```{r, include = FALSE, warning = FALSE, message = FALSE}
+new <- list(age=5, agesq=5^2, agecu = 5^3, mileage=15000,mileagesq=15000^2, eng_1.1 = 1, eng_1.0 = 0, eng_1.2 = 0,engineSize = 1.1,
+            mpg = 55.0, tax = 200, price=NA)
+```
+
+Using model 3, my point prediction for the type of car that I want to sell is 8826 pounds with a wide 95% prediction interval of 6850 to 10801 pounds. Model 4 predicts us a price of 10325 pounds with a 95% prediction interval of 8263 to 12386 pounds. 
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+# summary of predictions and PI 95% version
+# predict value for newly added obs
+reg3 <- lm(model3, data=data)
+pred1_new <- predict(reg3, newdata = new,se.fit = TRUE, interval = "prediction")
+p1<- pred1_new$fit
+
+reg4 <- lm(model4, data=data)
+pred2_new <- predict(reg4, newdata = new,se.fit = TRUE, interval = "prediction")
+p2<- pred2_new$fit
+
+#get model rmse
+data$p2a <- predict(reg3, data)
+rmse2 <- RMSE(data$p2a,data$price)
+
+# Result summary
+sum1 <- cbind(t(p1), t(p2))
+colnames(sum1) <- c('Model3', 'Model4')
+rownames(sum1) <- c('Predicted', 'PI_low (95%)', 'PI_high (95%)')
+sum1 %>%
+  kbl(caption = "<center><strong>Point predictions and Interval predictions (95%) using Model 3 and 4 </strong></center>", escape = FALSE) %>%
+  kable_classic(full_width = F, html_font = "Cambria") %>%
+  kable_styling( position = "center")
+
+```
+
+We also calculated prices with 80% prediction intervals. Using model 3, my point prediction for the type of car that I want to sell is 8826 pounds with a comparatively less wider 85% prediction interval of 7534 to 10117 pounds. Model 4 predicts us a price of 10325 pounds with a 95% prediction interval of 8977 to 11672 pounds. 
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+# summary of predictions and PI 80% version
+pred1_new80 <- predict(reg3, newdata = new, se.fit=TRUE, interval = "prediction", level=0.8)
+p180<- pred1_new80$fit
+
+pred2_new80 <- predict(reg4, newdata = new,se.fit = TRUE, interval = "prediction", level=0.8)
+p280<- pred2_new80$fit
+
+sum2 <- cbind(t(p180), t(p280))
+colnames(sum2) <- c('Model3', 'Model4')
+rownames(sum2) <- c('Predicted', 'PI_low (80%)', 'PI_high (80%)')
+sum2 %>% kbl(caption = "<center><strong>Point predictions and Interval predictions (80%) using Model 3 and 4 </strong></center>", escape = FALSE) %>%
+  kable_classic(full_width = F, html_font = "Cambria") %>%
+  kable_styling( position = "center")
+
+
+```
+
+I would recommend using Model 3 since its RMSE is pretty close to Model 4s. Model 3 is also less complex compared to Model 4. Even though the prediction intervals are quite wide, these results can help us advertise the car. If we want to sell quickly and know the car isnt in good condition, then we might want to go towards the lower end of the prediction intervals. If we know we can get a higher price and are willing to wait, we can price near the higher end of the prediction interval.
+
+
